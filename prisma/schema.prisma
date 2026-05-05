@@ -1,0 +1,208 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProjectRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum TaskEventType {
+  PROJECT_CREATED
+  MEMBER_ADDED
+  MEMBER_UPDATED
+  MEMBER_REMOVED
+  GROUP_CREATED
+  GROUP_UPDATED
+  GROUP_DELETED
+  COLUMN_CREATED
+  COLUMN_UPDATED
+  COLUMN_DELETED
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_MOVED
+  TASK_DELETED
+}
+
+enum AnnouncementPriority {
+  NORMAL
+  IMPORTANT
+  URGENT
+}
+
+model User {
+  id             String          @id @default(uuid())
+  email          String          @unique
+  name           String
+  passwordHash   String
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  ownedProjects  Project[]       @relation("ProjectOwner")
+  memberships    ProjectMember[]
+  assignedTasks  Task[]          @relation("TaskAssignee")
+  createdTasks   Task[]          @relation("TaskCreator")
+  authoredEvents TaskEvent[]     @relation("TaskEventActor")
+  announcements  Announcement[]  @relation("AnnouncementAuthor")
+}
+
+model Project {
+  id          String          @id @default(uuid())
+  name        String
+  description String          @default("")
+  ownerId     String
+  version     Int             @default(1)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  owner       User            @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     ProjectMember[]
+  columns     BoardColumn[]
+  tasks       Task[]
+  taskGroups  TaskGroup[]
+  events      TaskEvent[]
+  announcements Announcement[]
+
+  @@index([ownerId])
+}
+
+model ProjectMember {
+  id         String            @id @default(uuid())
+  userId     String
+  projectId  String
+  role       ProjectRole       @default(MEMBER)
+  createdAt  DateTime          @default(now())
+  project    Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user       User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taskGroups TaskGroupMember[]
+  announcementRecipients AnnouncementRecipient[]
+
+  @@unique([userId, projectId])
+  @@index([projectId])
+}
+
+model TaskGroup {
+  id        String            @id @default(uuid())
+  projectId String
+  name      String
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  project   Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  members   TaskGroupMember[]
+  tasks     Task[]            @relation("TaskGroupAssignee")
+
+  @@unique([projectId, name])
+  @@index([projectId])
+}
+
+model TaskGroupMember {
+  id        String        @id @default(uuid())
+  groupId   String
+  memberId  String
+  createdAt DateTime      @default(now())
+  group     TaskGroup     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  member    ProjectMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, memberId])
+  @@index([memberId])
+}
+
+model BoardColumn {
+  id          String   @id @default(uuid())
+  projectId   String
+  title       String
+  description String   @default("")
+  position    Int
+  version     Int      @default(1)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks       Task[]
+
+  @@index([projectId, position])
+}
+
+model Task {
+  id              String       @id @default(uuid())
+  projectId       String
+  columnId        String
+  title           String
+  description     String       @default("")
+  priority        TaskPriority @default(MEDIUM)
+  position        Decimal      @db.Decimal(20, 8)
+  version         Int          @default(1)
+  creatorId       String
+  assigneeId      String?
+  assigneeGroupId String?
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  project         Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  column          BoardColumn  @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  creator         User         @relation("TaskCreator", fields: [creatorId], references: [id])
+  assignee        User?        @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  assigneeGroup   TaskGroup?   @relation("TaskGroupAssignee", fields: [assigneeGroupId], references: [id], onDelete: SetNull)
+  events          TaskEvent[]
+
+  @@index([projectId])
+  @@index([columnId, position])
+  @@index([creatorId])
+  @@index([assigneeGroupId])
+}
+
+model TaskEvent {
+  id        String        @id @default(uuid())
+  projectId String
+  taskId    String?
+  actorId   String?
+  type      TaskEventType
+  payload   Json
+  createdAt DateTime      @default(now())
+  project   Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task      Task?         @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  actor     User?         @relation("TaskEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([projectId, createdAt])
+  @@index([taskId])
+}
+
+model Announcement {
+  id          String                  @id @default(uuid())
+  projectId   String
+  authorId    String?
+  title       String
+  body        String                  @default("")
+  priority    AnnouncementPriority    @default(NORMAL)
+  expiresAt   DateTime?
+  createdAt   DateTime                @default(now())
+  project     Project                 @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author      User?                   @relation("AnnouncementAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  recipients  AnnouncementRecipient[]
+
+  @@index([projectId, createdAt])
+  @@index([authorId])
+}
+
+model AnnouncementRecipient {
+  id             String       @id @default(uuid())
+  announcementId String
+  memberId       String
+  readAt         DateTime?
+  acknowledgedAt DateTime?
+  archivedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  announcement   Announcement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  member         ProjectMember @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@unique([announcementId, memberId])
+  @@index([memberId, readAt])
+}
