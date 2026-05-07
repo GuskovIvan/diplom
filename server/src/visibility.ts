@@ -89,7 +89,7 @@ function canViewFullBoard(viewer?: ViewerMembership | null) {
 }
 
 function canViewFullEventHistory(viewer?: ViewerMembership | null) {
-  return !viewer || viewer.role === "OWNER" || viewer.role === "MEMBER";
+  return !viewer || isProjectAdminRole(viewer.role) || viewer.role === "MEMBER";
 }
 
 export function taskIsVisibleToViewer(task: VisibleTask, viewer?: ViewerMembership | null) {

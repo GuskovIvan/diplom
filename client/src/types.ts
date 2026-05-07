@@ -4,7 +4,7 @@ export type User = {
   name: string;
 };
 
-export type ProjectRole = "OWNER" | "ADMIN" | "MEMBER";
+export type ProjectRole = "ADMIN" | "MEMBER";
 
 export type Project = {
   id: string;

@@ -68,24 +68,6 @@ function waitForSocketEvent<T>(socket: ReturnType<typeof createSocketClient>, ev
   });
 }
 
-async function expectNoSocketEvent(socket: ReturnType<typeof createSocketClient>, eventName: string, timeoutMs = 500) {
-  await expect(
-    new Promise<unknown>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        socket.off(eventName, onEvent);
-        resolve(null);
-      }, timeoutMs);
-
-      function onEvent(payload: unknown) {
-        clearTimeout(timeout);
-        reject(new Error(`Unexpected ${eventName}: ${JSON.stringify(payload)}`));
-      }
-
-      socket.once(eventName, onEvent);
-    })
-  ).resolves.toBeNull();
-}
-
 function listen(server: ReturnType<typeof createServer>) {
   return new Promise<number>((resolve) => {
     server.listen(0, "127.0.0.1", () => {
@@ -412,7 +394,7 @@ describe.sequential("board collaboration integration", () => {
     );
   });
 
-  it("shows administrators only history for tasks assigned directly to them in projects they do not own", async () => {
+  it("shows administrators full project history", async () => {
     const { owner, project } = await createProjectFixture();
     const board = await getBoard(project.id);
     const sourceColumn = board.columns[0];
@@ -461,7 +443,7 @@ describe.sequential("board collaboration integration", () => {
     await updateTask({
       taskId: visibleTask.task.id,
       actorId: owner.id,
-      description: "Owner updated admin task"
+      description: "Admin updated admin task"
     });
 
     const adminMembership = await prisma.projectMember.findUniqueOrThrow({
@@ -470,10 +452,13 @@ describe.sequential("board collaboration integration", () => {
     const adminEvents = await listEvents(project.id, 50, adminMembership);
     const adminEventTitles = adminEvents.map((event) => taskTitleFromEventPayload(event.payload)).filter(Boolean);
 
-    expect(adminEvents).toHaveLength(3);
-    expect(adminEvents.every((event) => event.taskId === visibleTask.task.id)).toBe(true);
-    expect(adminEvents.map((event) => event.type)).toEqual(["TASK_UPDATED", "TASK_MOVED", "TASK_CREATED"]);
-    expect(adminEventTitles).toEqual(["Admin visible task", "Admin visible task", "Admin visible task"]);
+    expect(adminEvents).toHaveLength(7);
+    expect(adminEvents.map((event) => event.type)).toEqual(
+      expect.arrayContaining(["PROJECT_CREATED", "MEMBER_ADDED", "TASK_CREATED", "TASK_MOVED", "TASK_UPDATED"])
+    );
+    expect(adminEventTitles).toEqual(
+      expect.arrayContaining(["Admin visible task", "Admin hidden task"])
+    );
   });
 
   it("returns a conflict error when creating a duplicate group name", async () => {
@@ -613,7 +598,7 @@ describe.sequential("board collaboration integration", () => {
     }
   });
 
-  it("publishes realtime task events to administrators only for tasks assigned directly to them", async () => {
+  it("publishes realtime task events to administrators for any project task", async () => {
     const { owner, project } = await createProjectFixture();
     const board = await getBoard(project.id);
     const column = board.columns[0];
@@ -659,7 +644,10 @@ describe.sequential("board collaboration integration", () => {
 
       expect(joinResponse).toEqual({ ok: true });
 
-      const hiddenEvent = expectNoSocketEvent(adminClient, "sync:event");
+      const hiddenEvent = waitForSocketEvent<{ type: string; taskId: string | null; actor: { email: string } }>(
+        adminClient,
+        "sync:event"
+      );
       const hiddenTask = await createTask({
         projectId: project.id,
         actorId: owner.id,
@@ -669,7 +657,13 @@ describe.sequential("board collaboration integration", () => {
         assigneeId: member.member.user.id
       });
       publishProjectEvent(ioServer, hiddenTask.event);
-      await hiddenEvent;
+      await expect(hiddenEvent).resolves.toMatchObject({
+        type: "TASK_CREATED",
+        taskId: hiddenTask.task.id,
+        actor: {
+          email: owner.email
+        }
+      });
 
       const visibleEvent = waitForSocketEvent<{ type: string; taskId: string | null; actor: { email: string } }>(
         adminClient,

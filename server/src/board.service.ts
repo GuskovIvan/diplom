@@ -265,7 +265,7 @@ export async function createProject(input: {
         members: {
           create: {
             userId: input.ownerId,
-            role: "OWNER"
+            role: "ADMIN"
           }
         },
         columns: {
@@ -300,7 +300,7 @@ export async function addProjectMember(input: {
   email: string;
   name?: string;
   password?: string;
-  role: Exclude<ProjectRole, "OWNER">;
+  role: ProjectRole;
 }) {
   return prisma.$transaction(async (tx) => {
     const email = input.email.trim().toLowerCase();
@@ -370,16 +370,12 @@ export async function updateProjectMemberRole(input: {
   projectId: string;
   actorId: string;
   memberId: string;
-  role: Exclude<ProjectRole, "OWNER">;
+  role: ProjectRole;
 }) {
   return prisma.$transaction(async (tx) => {
     const current = await tx.projectMember.findUnique({ where: { id: input.memberId } });
     if (!current || current.projectId !== input.projectId) {
       throw new HttpError(404, "Project member was not found");
-    }
-
-    if (current.role === "OWNER") {
-      throw new HttpError(403, "Project owner role cannot be changed");
     }
 
     const member = await tx.projectMember.update({
@@ -417,10 +413,6 @@ export async function removeProjectMember(input: { projectId: string; actorId: s
     });
     if (!current || current.projectId !== input.projectId) {
       throw new HttpError(404, "Project member was not found");
-    }
-
-    if (current.role === "OWNER") {
-      throw new HttpError(403, "Project owner cannot be removed from the project");
     }
 
     await tx.task.updateMany({

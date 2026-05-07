@@ -40,7 +40,7 @@ type MemberCreateInput = {
   email: string;
   name?: string;
   password?: string;
-  role: Exclude<ProjectRole, "OWNER">;
+  role: ProjectRole;
 };
 
 type TaskCreateInput = {
@@ -62,7 +62,6 @@ const priorityLabel: Record<TaskPriority, string> = {
 const priorityValues: TaskPriority[] = ["LOW", "MEDIUM", "HIGH"];
 
 const roleLabel: Record<ProjectRole, string> = {
-  OWNER: "владелец",
   ADMIN: "администратор",
   MEMBER: "участник"
 };
@@ -103,29 +102,21 @@ function safeError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function isAdminRole(role: ProjectRole | null | undefined): role is "OWNER" | "ADMIN" {
-  return role === "OWNER" || role === "ADMIN";
+function isAdminRole(role: ProjectRole | null | undefined): role is "ADMIN" {
+  return role === "ADMIN";
 }
 
 function allowedMemberTargets(members: ProjectMember[], currentRole: ProjectRole | null) {
-  if (currentRole === "OWNER") {
-    return members.filter((member) => member.role !== "OWNER");
-  }
-
   if (currentRole === "ADMIN") {
-    return members.filter((member) => member.role === "MEMBER");
+    return members;
   }
 
   return [];
 }
 
 function allowedGroupTargets(groups: TaskGroup[], currentRole: ProjectRole | null) {
-  if (currentRole === "OWNER") {
-    return groups.filter((group) => group.members.length > 0 && group.members.every((member) => member.role !== "OWNER"));
-  }
-
   if (currentRole === "ADMIN") {
-    return groups.filter((group) => group.members.length > 0 && group.members.every((member) => member.role === "MEMBER"));
+    return groups.filter((group) => group.members.length > 0);
   }
 
   return [];
@@ -492,7 +483,7 @@ type MembersPanelProps = {
   currentRole: ProjectRole | null;
   currentUserId: string;
   onAddMember: (input: MemberCreateInput) => Promise<void>;
-  onChangeRole: (member: ProjectMember, role: Exclude<ProjectRole, "OWNER">) => Promise<void>;
+  onChangeRole: (member: ProjectMember, role: ProjectRole) => Promise<void>;
   onRemoveMember: (member: ProjectMember) => Promise<void>;
 };
 
@@ -500,17 +491,10 @@ function MembersPanel({ members, currentRole, currentUserId, onAddMember, onChan
   const [email, setEmail] = React.useState("");
   const [name, setName] = React.useState("");
   const [password, setPassword] = React.useState("");
-  const [role, setRole] = React.useState<Exclude<ProjectRole, "OWNER">>("MEMBER");
+  const [role, setRole] = React.useState<ProjectRole>("MEMBER");
   const [submitting, setSubmitting] = React.useState(false);
 
   const canManageMembers = isAdminRole(currentRole);
-  const isOwner = currentRole === "OWNER";
-
-  React.useEffect(() => {
-    if (!isOwner && role === "ADMIN") {
-      setRole("MEMBER");
-    }
-  }, [isOwner, role]);
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -546,10 +530,8 @@ function MembersPanel({ members, currentRole, currentUserId, onAddMember, onChan
 
       <div className="member-list">
         {members.map((member) => {
-          const canChangeRole = isOwner && member.role !== "OWNER" && member.user.id !== currentUserId;
-          const canRemove = member.role !== "OWNER"
-            && member.user.id !== currentUserId
-            && (isOwner || (currentRole === "ADMIN" && member.role === "MEMBER"));
+          const canChangeRole = currentRole === "ADMIN" && member.user.id !== currentUserId;
+          const canRemove = currentRole === "ADMIN" && member.user.id !== currentUserId;
 
           return (
             <article className="member-row" key={member.id}>
@@ -560,7 +542,7 @@ function MembersPanel({ members, currentRole, currentUserId, onAddMember, onChan
               </div>
 
               {canChangeRole ? (
-                <select value={member.role} onChange={(event) => { void onChangeRole(member, event.target.value as Exclude<ProjectRole, "OWNER">); }}>
+                <select value={member.role} onChange={(event) => { void onChangeRole(member, event.target.value as ProjectRole); }}>
                   <option value="MEMBER">участник</option>
                   <option value="ADMIN">администратор</option>
                 </select>
@@ -581,15 +563,15 @@ function MembersPanel({ members, currentRole, currentUserId, onAddMember, onChan
           <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" placeholder="email пользователя" />
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder="имя пользователя" />
           <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={8} placeholder="пароль для нового аккаунта" />
-          <select value={role} onChange={(event) => setRole(event.target.value as Exclude<ProjectRole, "OWNER">)}>
+          <select value={role} onChange={(event) => setRole(event.target.value as ProjectRole)}>
             <option value="MEMBER">участник</option>
-            {isOwner ? <option value="ADMIN">администратор</option> : null}
+            <option value="ADMIN">администратор</option>
           </select>
           <button disabled={submitting}>{submitting ? "Добавляем..." : "Добавить"}</button>
           <p className="hint">Если аккаунта нет, он будет создан с этим именем и паролем. Если пароль оставить пустым, сервер создаст уникальный временный пароль.</p>
         </form>
       ) : (
-        <p className="hint">Состав команды меняют владелец и администраторы.</p>
+        <p className="hint">Состав команды меняют администраторы.</p>
       )}
     </aside>
   );
@@ -625,8 +607,7 @@ function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGrou
       : [...current, memberId]);
   };
 
-  const canEditGroup = (group: TaskGroup) => currentRole === "OWNER"
-    || (currentRole === "ADMIN" && group.members.every((member) => member.role === "MEMBER"));
+  const canEditGroup = (_group: TaskGroup) => currentRole === "ADMIN";
 
   const startEditing = (group: TaskGroup) => {
     setEditingGroupId(group.id);
@@ -681,7 +662,7 @@ function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGrou
                 </div>
               ) : null}
 
-              {canManageGroups && !editable ? <small>только владелец</small> : null}
+              {canManageGroups && !editable ? <small>только администратор</small> : null}
             </article>
           );
         })}
@@ -709,10 +690,10 @@ function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGrou
             <button type="button" className="ghost-button" onClick={resetForm}>Отменить</button>
           ) : null}
 
-          <p className="hint">Владелец может включать администраторов и участников, администратор - только участников.</p>
+          <p className="hint">Администраторы могут включать в группы администраторов и участников.</p>
         </form>
       ) : (
-        <p className="hint">Группы создают владелец и администраторы проекта.</p>
+        <p className="hint">Группы создают администраторы проекта.</p>
       )}
     </aside>
   );
@@ -730,7 +711,7 @@ type ProjectRailProps = {
   currentRole: ProjectRole | null;
   canCreateProjects: boolean;
   onAddMember: (input: MemberCreateInput) => Promise<void>;
-  onChangeRole: (member: ProjectMember, role: Exclude<ProjectRole, "OWNER">) => Promise<void>;
+  onChangeRole: (member: ProjectMember, role: ProjectRole) => Promise<void>;
   onRemoveMember: (member: ProjectMember) => Promise<void>;
   onCreateGroup: (input: { name: string; memberIds: string[] }) => Promise<void>;
   onUpdateGroup: (group: TaskGroup, input: { name?: string; memberIds?: string[] }) => Promise<void>;
@@ -820,7 +801,7 @@ function ProjectRail({
           <button>Создать</button>
         </form>
       ) : (
-        <p className="hint">Пространства создают владелец и администраторы.</p>
+        <p className="hint">Пространства создают администраторы.</p>
       )}
 
       <button className="ghost-button" onClick={onLogout}>Выйти</button>
@@ -1076,7 +1057,7 @@ function BoardColumnView({
       {canCreateTask ? (
         <TaskCreateForm column={column} members={members} groups={groups} onCreate={(input) => onCreateTask(column, input)} />
       ) : (
-        <p className="hint column-hint">Новые задачи добавляют владелец и администраторы проекта.</p>
+        <p className="hint column-hint">Новые задачи добавляют администраторы проекта.</p>
       )}
     </section>
   );
@@ -1472,7 +1453,7 @@ function RoadmapComposer({
   }, [columnId, columns]);
 
   if (!canManage) {
-    return <p className="roadmap-readonly">Участники могут только просматривать дорожную карту. Добавлять и менять цели могут владелец и администраторы.</p>;
+    return <p className="roadmap-readonly">Участники могут только просматривать дорожную карту. Добавлять и менять цели могут администраторы.</p>;
   }
 
   if (columns.length === 0) {
@@ -1739,7 +1720,7 @@ function AnnouncementComposer({
   };
 
   if (!canCreate) {
-    return <p className="roadmap-readonly">Объявления создают владелец и администраторы проекта.</p>;
+    return <p className="roadmap-readonly">Объявления создают администраторы проекта.</p>;
   }
 
   return (
@@ -1776,7 +1757,7 @@ function AnnouncementComposer({
       </div>
 
       <div className="announcement-recipient-list">
-        {(["OWNER", "ADMIN", "MEMBER"] as ProjectRole[]).map((role) => (
+        {(["ADMIN", "MEMBER"] as ProjectRole[]).map((role) => (
           <label className="checkbox-row" key={role}>
             <input type="checkbox" checked={recipientRoles.includes(role)} onChange={() => toggleRole(role)} />
             <span>Все: {roleLabel[role]}</span>
@@ -2170,13 +2151,13 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
 
   const createProject = async (input: { name: string; description: string }) => {
     if (!canCreateProjects) {
-      setError("Пространства создают только владелец и администраторы.");
+      setError("Пространства создают только администраторы.");
       return;
     }
 
     try {
       const response = await api.createProject(auth.token, input);
-      setProjects((current) => [{ ...response.project, role: "OWNER" }, ...current]);
+      setProjects((current) => [{ ...response.project, role: "ADMIN" }, ...current]);
       setActiveProjectId(response.project.id);
       setView("board");
     } catch (createError) {
@@ -2191,7 +2172,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     }
 
     if (!canManageBoard) {
-      setError("Колонки создают владелец и администраторы проекта.");
+      setError("Колонки создают администраторы проекта.");
       return;
     }
 
@@ -2200,7 +2181,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
 
   const renameColumn = async (column: BoardColumn) => {
     if (!canManageBoard) {
-      setError("Колонки меняют владелец и администраторы проекта.");
+      setError("Колонки меняют администраторы проекта.");
       return;
     }
 
@@ -2209,7 +2190,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
 
   const deleteColumn = async (column: BoardColumn) => {
     if (!canManageBoard) {
-      setError("Колонки удаляют владелец и администраторы проекта.");
+      setError("Колонки удаляют администраторы проекта.");
       return;
     }
 
@@ -2234,7 +2215,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     }
 
     if (!canManageBoard) {
-      setError("Новые задачи добавляют владелец и администраторы проекта.");
+      setError("Новые задачи добавляют администраторы проекта.");
       return;
     }
 
@@ -2248,7 +2229,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     }
 
     if (!canManageBoard) {
-      setError("Цели roadmap добавляют только владелец и администраторы проекта.");
+      setError("Цели roadmap добавляют только администраторы проекта.");
       return;
     }
 
@@ -2258,7 +2239,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
 
   const deleteTask = async (task: Task) => {
     if (!canManageBoard) {
-      setError("Удалять задачи могут только владелец и администраторы проекта.");
+      setError("Удалять задачи могут только администраторы проекта.");
       return;
     }
 
@@ -2275,7 +2256,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
 
   const quickEditTask = async (task: Task) => {
     if (!canEditTask(task)) {
-      setError("Изменять задачи могут только владелец и администраторы.");
+      setError("Изменять задачи могут только администраторы.");
       return;
     }
 
@@ -2316,7 +2297,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
 
   const assignTask = async (task: Task, input: TaskAssignmentInput) => {
     if (!canManageBoard) {
-      setError("Назначать исполнителей могут только владелец и администраторы проекта.");
+      setError("Назначать исполнителей могут только администраторы проекта.");
       return;
     }
 
@@ -2349,7 +2330,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     }
   };
 
-  const changeMemberRole = async (member: ProjectMember, role: Exclude<ProjectRole, "OWNER">) => {
+  const changeMemberRole = async (member: ProjectMember, role: ProjectRole) => {
     if (!activeProjectId) {
       return;
     }
@@ -2397,7 +2378,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     }
 
     if (!canManageBoard) {
-      setError("Объявления создают владелец и администраторы проекта.");
+      setError("Объявления создают администраторы проекта.");
       return;
     }
 

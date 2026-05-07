@@ -142,7 +142,7 @@ describe.sequential("project creation access", () => {
 
     expect(response.status).toBe(403);
     expect(body).toMatchObject({
-      error: "Only a project owner or administrator can create a new space"
+      error: "Only a project administrator can create a new space"
     });
   });
 

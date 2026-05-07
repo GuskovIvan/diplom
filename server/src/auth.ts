@@ -101,25 +101,25 @@ export async function requireProjectCreationAccess(userId: string) {
     where: {
       userId,
       role: {
-        in: ["OWNER", "ADMIN"]
+        in: ["ADMIN"]
       }
     }
   });
 
   if (!member) {
-    throw new HttpError(403, "Only a project owner or administrator can create a new space");
+    throw new HttpError(403, "Only a project administrator can create a new space");
   }
 
   return member;
 }
 
 export function isProjectAdminRole(role: ProjectRole) {
-  return role === "OWNER" || role === "ADMIN";
+  return role === "ADMIN";
 }
 
 export function assertProjectAdmin(member: ProjectMembership) {
   if (!isProjectAdminRole(member.role)) {
-    throw new HttpError(403, "Only a project owner or administrator can do this");
+    throw new HttpError(403, "Only a project administrator can do this");
   }
 }
 
@@ -133,9 +133,5 @@ export async function requireProjectRole(projectId: string, userId: string, role
 }
 
 export function requireProjectAdmin(projectId: string, userId: string) {
-  return requireProjectRole(projectId, userId, ["OWNER", "ADMIN"]);
-}
-
-export function requireProjectOwner(projectId: string, userId: string) {
-  return requireProjectRole(projectId, userId, ["OWNER"]);
+  return requireProjectRole(projectId, userId, ["ADMIN"]);
 }

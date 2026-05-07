@@ -10,9 +10,9 @@ const demoUsers: Array<{
 }> = [
   {
     email: "demo@example.com",
-    name: "Демо-владелец",
+    name: "Демо-администратор",
     password: "demo12345",
-    role: "OWNER"
+    role: "ADMIN"
   },
   {
     email: "admin@example.com",
@@ -155,7 +155,7 @@ async function ensureTasks(project: Awaited<ReturnType<typeof ensureProject>>, w
         projectId: project.id,
         columnId: byTitle.get("В работе")!.id,
         title: "Реализовать ролевую модель доступа",
-        description: "Владелец и администратор управляют участниками, исполнители работают со своими задачами.",
+        description: "Администраторы управляют участниками, исполнители работают со своими задачами.",
         priority: "HIGH",
         creatorId: project.ownerId,
         assigneeId: workers[0].id,
@@ -197,7 +197,7 @@ async function main() {
   await ensureTasks(project, [worker1, worker2]);
 
   console.log("Демо-данные готовы");
-  console.log("Владелец:       demo@example.com / demo12345");
+  console.log("Демо-админ:      demo@example.com / demo12345");
   console.log("Администратор: admin@example.com / admin12345");
   console.log("Исполнитель 1: worker1@example.com / worker12345");
   console.log("Исполнитель 2: worker2@example.com / worker12345");

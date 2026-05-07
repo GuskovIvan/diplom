@@ -45,7 +45,7 @@ export const announcementCreateSchema = z.object({
   priority: z.enum(["NORMAL", "IMPORTANT", "URGENT"]).optional().default("NORMAL"),
   expiresAt: z.string().datetime().nullable().optional(),
   recipientMemberIds: z.array(z.string().uuid()).optional().default([]),
-  recipientRoles: z.array(z.enum(["OWNER", "ADMIN", "MEMBER"])).optional().default([])
+  recipientRoles: z.array(z.enum(["ADMIN", "MEMBER"])).optional().default([])
 }).refine((value) => value.recipientMemberIds.length > 0 || value.recipientRoles.length > 0, {
   message: "Choose at least one announcement recipient",
   path: ["recipientMemberIds"]

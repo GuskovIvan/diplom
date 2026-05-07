@@ -200,7 +200,7 @@ export const api = {
   async addMember(
     token: string,
     projectId: string,
-    input: { email: string; name?: string; password?: string; role: Exclude<ProjectRole, "OWNER"> }
+    input: { email: string; name?: string; password?: string; role: ProjectRole }
   ) {
     return request<{ member: ProjectMember; createdUser: boolean; temporaryPassword: string | null }>(`/api/projects/${projectId}/members`, {
       token,
@@ -209,7 +209,7 @@ export const api = {
     });
   },
 
-  async updateMember(token: string, projectId: string, memberId: string, input: { role: Exclude<ProjectRole, "OWNER"> }) {
+  async updateMember(token: string, projectId: string, memberId: string, input: { role: ProjectRole }) {
     return request<{ member: ProjectMember }>(`/api/projects/${projectId}/members/${memberId}`, {
       token,
       method: "PATCH",

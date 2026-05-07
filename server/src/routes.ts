@@ -9,7 +9,6 @@ import {
   requireProjectCreationAccess,
   requireProjectAdmin,
   requireProjectMember,
-  requireProjectOwner,
   signToken,
   type AuthenticatedRequest
 } from "./auth.js";
@@ -98,19 +97,11 @@ type AssignmentInput = {
 };
 
 function assertActorCanTargetRoles(actor: ProjectMembership, roles: string[]) {
-  if (roles.includes("OWNER")) {
-    throw new HttpError(403, "Tasks cannot be assigned to the project owner");
-  }
-
-  if (actor.role === "OWNER") {
+  if (actor.role === "ADMIN" && roles.every((role) => role === "ADMIN" || role === "MEMBER")) {
     return;
   }
 
-  if (actor.role === "ADMIN" && roles.every((role) => role === "MEMBER")) {
-    return;
-  }
-
-  throw new HttpError(403, "Administrators can assign tasks only to regular project members");
+  throw new HttpError(403, "Only project administrators can assign tasks");
 }
 
 async function getAssignmentTargetRoles(projectId: string, assignment: AssignmentInput) {
@@ -496,11 +487,7 @@ export function registerRoutes(app: Express) {
     asyncRoute(async (req, res) => {
       const projectId = routeParam(req, "projectId");
       const input = memberCreateSchema.parse(req.body);
-      if (input.role === "ADMIN") {
-        await requireProjectOwner(projectId, authReq(req).user.id);
-      } else {
-        await requireProjectAdmin(projectId, authReq(req).user.id);
-      }
+      await requireProjectAdmin(projectId, authReq(req).user.id);
 
       const result = await addProjectMember({
         projectId,
@@ -526,10 +513,10 @@ export function registerRoutes(app: Express) {
       const memberId = routeParam(req, "memberId");
       const input = memberUpdateSchema.parse(req.body);
       const target = await getProjectMemberForRoute(projectId, memberId);
-      await requireProjectOwner(projectId, authReq(req).user.id);
+      await requireProjectAdmin(projectId, authReq(req).user.id);
 
       if (target.userId === authReq(req).user.id) {
-        throw new HttpError(409, "Project owner cannot change their own role here");
+        throw new HttpError(409, "You cannot change your own role here");
       }
 
       const member = await updateProjectMemberRole({
@@ -555,11 +542,7 @@ export function registerRoutes(app: Express) {
         throw new HttpError(409, "You cannot remove yourself from the project");
       }
 
-      if (target.role === "ADMIN") {
-        await requireProjectOwner(projectId, authReq(req).user.id);
-      } else {
-        assertProjectAdmin(actor);
-      }
+      assertProjectAdmin(actor);
 
       const result = await removeProjectMember({
         projectId,
