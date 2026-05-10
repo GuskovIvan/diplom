@@ -1,27 +1,16 @@
-import { randomBytes } from "node:crypto";
 import { Prisma, type ProjectRole, type TaskEvent } from "@prisma/client";
 import { hashPassword, type ProjectMembership } from "./auth.js";
 import { HttpError } from "./errors.js";
 import { prisma } from "./prisma.js";
 import { calculateMovePosition, POSITION_STEP } from "./positioning.js";
-import { announcementDto, boardDto, columnDto, eventDto, memberDto, projectDto, taskDto, taskGroupDto } from "./serializers.js";
+import { announcementDto, boardDto, columnDto, eventDto, memberDto, projectDto, taskDto, taskGroupDto, userDto } from "./serializers.js";
 import { eventIsVisibleToViewer, filterBoardForViewer } from "./visibility.js";
 
 const defaultColumns = [
   { title: "План", description: "Идеи и задачи, которые еще не взяли в работу." },
   { title: "В работе", description: "Задачи, которые сейчас выполняются." },
-  { title: "На проверке", description: "Готовые изменения, ожидающие проверки." },
-  { title: "Готово", description: "Завершенные задачи проекта." }
+  { title: "На проверке", description: "Готовые изменения, ожидающие проверки." }
 ];
-function nameFromEmail(email: string) {
-  const localPart = email.split("@")[0]?.trim();
-  return localPart || email;
-}
-
-function createTemporaryPassword() {
-  return randomBytes(9).toString("base64url").slice(0, 12);
-}
-
 function jsonPayload(payload: unknown) {
   return JSON.parse(JSON.stringify(payload)) as Prisma.InputJsonValue;
 }
@@ -109,6 +98,12 @@ const taskInclude = {
     select: userSelect
   },
   assignee: {
+    select: userSelect
+  },
+  completedBy: {
+    select: userSelect
+  },
+  completionRequestedBy: {
     select: userSelect
   },
   assigneeGroup: {
@@ -294,30 +289,238 @@ export async function createProject(input: {
   });
 }
 
-export async function addProjectMember(input: {
-  projectId: string;
+export async function deleteProject(projectId: string) {
+  await prisma.project.delete({
+    where: { id: projectId }
+  });
+}
+
+export async function listAvailableProjectUsers(projectId: string) {
+  const users = await prisma.user.findMany({
+    where: {
+      memberships: {
+        none: {
+          projectId
+        }
+      }
+    },
+    select: userSelect,
+    orderBy: [
+      { name: "asc" },
+      { email: "asc" }
+    ]
+  });
+
+  return users.map(userDto);
+}
+
+export async function listRegisteredUsers(actorId: string) {
+  const users = await prisma.user.findMany({
+    where: {
+      id: {
+        not: actorId
+      }
+    },
+    select: userSelect,
+    orderBy: [
+      { name: "asc" },
+      { email: "asc" }
+    ]
+  });
+
+  return users.map(userDto);
+}
+
+async function createProjectMemberships(
+  tx: Prisma.TransactionClient,
+  input: {
+    projectIds: string[];
+    userId: string;
+    actorId: string;
+    role: ProjectRole;
+  }
+) {
+  const uniqueProjectIds = [...new Set(input.projectIds)];
+  const existingMemberships = await tx.projectMember.findMany({
+    where: {
+      userId: input.userId,
+      projectId: {
+        in: uniqueProjectIds
+      }
+    },
+    select: {
+      projectId: true
+    }
+  });
+  const existingProjectIds = new Set(existingMemberships.map((membership) => membership.projectId));
+  const targetProjectIds = uniqueProjectIds.filter((projectId) => !existingProjectIds.has(projectId));
+  const members: ReturnType<typeof memberDto>[] = [];
+  const events: Awaited<ReturnType<typeof createEvent>>[] = [];
+
+  for (const projectId of targetProjectIds) {
+    const member = await tx.projectMember.create({
+      data: {
+        projectId,
+        userId: input.userId,
+        role: input.role
+      },
+      include: memberInclude
+    });
+
+    await tx.project.update({
+      where: { id: projectId },
+      data: { version: { increment: 1 } }
+    });
+
+    const memberPayload = memberDto(member);
+    members.push(memberPayload);
+    events.push(
+      await createEvent(tx, {
+        projectId,
+        actorId: input.actorId,
+        type: "MEMBER_ADDED",
+        payload: {
+          member: memberPayload
+        }
+      })
+    );
+  }
+
+  return { members, events };
+}
+
+export async function createRegisteredUser(input: {
   actorId: string;
   email: string;
-  name?: string;
-  password?: string;
+  name: string;
+  password: string;
+  projectIds: string[];
+  role: ProjectRole;
+}) {
+  const passwordHash = await hashPassword(input.password);
+
+  return prisma.$transaction(async (tx) => {
+    const email = input.email.trim().toLowerCase();
+    const existing = await tx.user.findUnique({ where: { email } });
+    if (existing) {
+      throw new HttpError(409, "User with this email already exists");
+    }
+
+    const user = await tx.user.create({
+      data: {
+        email,
+        name: input.name.trim(),
+        passwordHash
+      }
+    });
+
+    const { members, events } = await createProjectMemberships(tx, {
+      projectIds: input.projectIds,
+      userId: user.id,
+      actorId: input.actorId,
+      role: input.role
+    });
+
+    return {
+      user: userDto(user),
+      member: members[0] ?? null,
+      members,
+      event: events[0] ?? null,
+      events
+    };
+  });
+}
+
+export async function addRegisteredUserToProjects(input: {
+  actorId: string;
+  userId: string;
+  projectIds: string[];
   role: ProjectRole;
 }) {
   return prisma.$transaction(async (tx) => {
-    const email = input.email.trim().toLowerCase();
-    let createdUser = false;
-    let temporaryPassword: string | null = null;
-    let user = await tx.user.findUnique({ where: { email } });
-
+    const user = await tx.user.findUnique({ where: { id: input.userId } });
     if (!user) {
-      temporaryPassword = input.password ?? createTemporaryPassword();
-      user = await tx.user.create({
-        data: {
-          email,
-          name: input.name?.trim() || nameFromEmail(email),
-          passwordHash: await hashPassword(temporaryPassword)
+      throw new HttpError(404, "User was not found");
+    }
+
+    return createProjectMemberships(tx, {
+      projectIds: input.projectIds,
+      userId: input.userId,
+      actorId: input.actorId,
+      role: input.role
+    });
+  });
+}
+
+export async function deleteRegisteredUser(input: { actorId: string; userId: string }) {
+  if (input.actorId === input.userId) {
+    throw new HttpError(409, "You cannot delete your own account");
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const user = await tx.user.findUnique({ where: { id: input.userId } });
+    if (!user) {
+      throw new HttpError(404, "User was not found");
+    }
+
+    const adminMemberships = await tx.projectMember.findMany({
+      where: {
+        userId: input.userId,
+        role: "ADMIN",
+        project: {
+          ownerId: {
+            not: input.userId
+          }
+        }
+      },
+      include: {
+        project: true
+      }
+    });
+
+    for (const membership of adminMemberships) {
+      const otherAdmins = await tx.projectMember.count({
+        where: {
+          projectId: membership.projectId,
+          role: "ADMIN",
+          userId: {
+            not: input.userId
+          }
         }
       });
-      createdUser = true;
+
+      if (otherAdmins === 0) {
+        throw new HttpError(409, `Cannot delete the only administrator of "${membership.project.name}"`);
+      }
+    }
+
+    await tx.task.updateMany({
+      where: {
+        creatorId: input.userId
+      },
+      data: {
+        creatorId: input.actorId
+      }
+    });
+
+    await tx.user.delete({ where: { id: input.userId } });
+
+    return {
+      user: userDto(user)
+    };
+  });
+}
+
+export async function addProjectMember(input: {
+  projectId: string;
+  actorId: string;
+  userId: string;
+  role: ProjectRole;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const user = await tx.user.findUnique({ where: { id: input.userId } });
+    if (!user) {
+      throw new HttpError(404, "User was not found");
     }
 
     const existing = await tx.projectMember.findUnique({
@@ -352,15 +555,12 @@ export async function addProjectMember(input: {
       actorId: input.actorId,
       type: "MEMBER_ADDED",
       payload: {
-        member: memberPayload,
-        createdUser
+        member: memberPayload
       }
     });
 
     return {
       member: memberPayload,
-      createdUser,
-      temporaryPassword,
       event
     };
   });
@@ -1105,6 +1305,267 @@ export async function deleteTask(input: { taskId: string; actorId: string }) {
   });
 }
 
+export async function requestTaskCompletion(input: { taskId: string; actorId: string }) {
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.task.findUnique({
+      where: { id: input.taskId },
+      include: taskInclude
+    });
+    if (!current) {
+      throw new HttpError(404, "Task was not found");
+    }
+    if (current.isCompleted) {
+      throw new HttpError(409, "Task is already completed");
+    }
+
+    const actorMembership = await tx.projectMember.findUnique({
+      where: {
+        userId_projectId: {
+          userId: input.actorId,
+          projectId: current.projectId
+        }
+      },
+      include: memberInclude
+    });
+    if (!actorMembership) {
+      throw new HttpError(403, "Only project members can submit tasks for completion");
+    }
+    if (actorMembership.role !== "MEMBER") {
+      throw new HttpError(403, "Only project participants can submit tasks for completion");
+    }
+
+    if (current.completionRequestedAt) {
+      return { task: taskDto(current), event: null, announcement: null };
+    }
+
+    const requestedAt = new Date();
+    const task = await tx.task.update({
+      where: { id: input.taskId },
+      data: {
+        completionRequestedAt: requestedAt,
+        completionRequestedById: input.actorId,
+        version: { increment: 1 }
+      },
+      include: taskInclude
+    });
+    const taskPayload = taskDto(task);
+
+    const event = await createEvent(tx, {
+      projectId: task.projectId,
+      taskId: task.id,
+      actorId: input.actorId,
+      type: "TASK_COMPLETION_REQUESTED",
+      payload: {
+        task: taskPayload,
+        previousTask: taskDto(current),
+        requestedBy: memberDto(actorMembership)
+      }
+    });
+
+    const creatorMembership = await tx.projectMember.findUnique({
+      where: {
+        userId_projectId: {
+          userId: current.creatorId,
+          projectId: current.projectId
+        }
+      },
+      include: memberInclude
+    });
+    const announcement = creatorMembership?.role === "ADMIN"
+      ? await tx.announcement.create({
+          data: {
+            projectId: current.projectId,
+            authorId: input.actorId,
+            title: `Задача «${current.title}» выполнена`,
+            body: `${actorMembership.user.name} сообщает, что работа по задаче «${current.title}» выполнена.`,
+            priority: "IMPORTANT",
+            recipients: {
+              create: [{ memberId: creatorMembership.id }]
+            }
+          },
+          include: announcementInclude
+        })
+      : null;
+
+    await tx.project.update({
+      where: { id: task.projectId },
+      data: { version: { increment: 1 } }
+    });
+
+    return {
+      task: taskPayload,
+      event,
+      announcement: announcement ? announcementDto(announcement, creatorMembership?.id) : null
+    };
+  });
+}
+
+export async function completeTask(input: { taskId: string; actorId: string }) {
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.task.findUnique({
+      where: { id: input.taskId },
+      include: taskInclude
+    });
+    if (!current) {
+      throw new HttpError(404, "Task was not found");
+    }
+
+    if (current.isCompleted) {
+      return { task: taskDto(current), event: null };
+    }
+    if (!current.completionRequestedAt) {
+      throw new HttpError(409, "Task has not been submitted for completion yet");
+    }
+
+    const lastCompletedTask = await tx.task.findFirst({
+      where: {
+        columnId: current.columnId,
+        isCompleted: true
+      },
+      orderBy: [
+        { completedPosition: "desc" },
+        { completedAt: "desc" }
+      ]
+    });
+    const completedPosition = (lastCompletedTask?.completedPosition ?? 0) + 1;
+
+    const task = await tx.task.update({
+      where: { id: input.taskId },
+      data: {
+        isCompleted: true,
+        completedAt: new Date(),
+        completedPosition,
+        completedById: input.actorId,
+        version: { increment: 1 }
+      },
+      include: taskInclude
+    });
+
+    const taskPayload = taskDto(task);
+    const event = await createEvent(tx, {
+      projectId: task.projectId,
+      taskId: task.id,
+      actorId: input.actorId,
+      type: "TASK_COMPLETED",
+      payload: {
+        task: taskPayload,
+        previousTask: taskDto(current)
+      }
+    });
+
+    await tx.project.update({
+      where: { id: task.projectId },
+      data: { version: { increment: 1 } }
+    });
+
+    return { task: taskPayload, event };
+  });
+}
+
+export async function moveCompletedTask(input: {
+  taskId: string;
+  actorId: string;
+  beforeTaskId?: string | null;
+  afterTaskId?: string | null;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.task.findUnique({
+      where: { id: input.taskId },
+      include: taskInclude
+    });
+    if (!current) {
+      throw new HttpError(404, "Task was not found");
+    }
+    if (!current.isCompleted) {
+      throw new HttpError(409, "Only completed tasks can be reordered on the roadmap");
+    }
+
+    const completedTasks = await tx.task.findMany({
+      where: {
+        columnId: current.columnId,
+        isCompleted: true
+      },
+      orderBy: [
+        { completedPosition: "asc" },
+        { completedAt: "asc" },
+        { createdAt: "asc" }
+      ],
+      select: {
+        id: true,
+        completedPosition: true
+      }
+    });
+
+    const completedTaskIds = new Set(completedTasks.map((task) => task.id));
+    if (input.beforeTaskId && !completedTaskIds.has(input.beforeTaskId)) {
+      throw new HttpError(400, "beforeTaskId must point to a completed task in the same roadmap column");
+    }
+    if (input.afterTaskId && !completedTaskIds.has(input.afterTaskId)) {
+      throw new HttpError(400, "afterTaskId must point to a completed task in the same roadmap column");
+    }
+    if (input.beforeTaskId === current.id || input.afterTaskId === current.id) {
+      throw new HttpError(400, "Move anchor cannot be the moved task itself");
+    }
+
+    const orderedTaskIds = completedTasks.filter((task) => task.id !== current.id).map((task) => task.id);
+    let insertIndex = orderedTaskIds.length;
+    if (input.beforeTaskId) {
+      insertIndex = orderedTaskIds.indexOf(input.beforeTaskId);
+    } else if (input.afterTaskId) {
+      insertIndex = orderedTaskIds.indexOf(input.afterTaskId) + 1;
+    }
+    orderedTaskIds.splice(insertIndex, 0, current.id);
+
+    const previousPosition = completedTasks.findIndex((task) => task.id === current.id) + 1;
+    const nextPosition = orderedTaskIds.indexOf(current.id) + 1;
+    if (previousPosition === nextPosition) {
+      return { task: taskDto(current), event: null };
+    }
+
+    for (const [index, taskId] of orderedTaskIds.entries()) {
+      await tx.task.update({
+        where: { id: taskId },
+        data: {
+          completedPosition: index + 1,
+          ...(taskId === current.id ? { version: { increment: 1 } } : {})
+        }
+      });
+    }
+
+    const task = await tx.task.findUnique({
+      where: { id: current.id },
+      include: taskInclude
+    });
+    if (!task) {
+      throw new HttpError(404, "Task was not found");
+    }
+
+    const taskPayload = taskDto(task);
+    const event = await createEvent(tx, {
+      projectId: task.projectId,
+      taskId: task.id,
+      actorId: input.actorId,
+      type: "TASK_ROADMAP_MOVED",
+      payload: {
+        task: taskPayload,
+        previous: {
+          completedPosition: previousPosition
+        },
+        current: {
+          completedPosition: nextPosition
+        }
+      }
+    });
+
+    await tx.project.update({
+      where: { id: task.projectId },
+      data: { version: { increment: 1 } }
+    });
+
+    return { task: taskPayload, event };
+  });
+}
+
 export async function moveTask(input: {
   taskId: string;
   actorId: string;
@@ -1121,6 +1582,9 @@ export async function moveTask(input: {
 
     if (!current) {
       throw new HttpError(404, "Task was not found");
+    }
+    if (current.isCompleted) {
+      throw new HttpError(409, "Completed tasks can only be reordered on the roadmap");
     }
 
     const targetColumn = await ensureColumnInProject(input.columnId, current.projectId, tx);

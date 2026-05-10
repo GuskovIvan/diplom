@@ -107,7 +107,22 @@ export async function requireProjectCreationAccess(userId: string) {
   });
 
   if (!member) {
-    throw new HttpError(403, "Only a project administrator can create a new space");
+    throw new HttpError(403, "Only a project administrator can create a new project");
+  }
+
+  return member;
+}
+
+export async function requireAnyProjectAdmin(userId: string) {
+  const member = await prisma.projectMember.findFirst({
+    where: {
+      userId,
+      role: "ADMIN"
+    }
+  });
+
+  if (!member) {
+    throw new HttpError(403, "Only a project administrator can manage users");
   }
 
   return member;

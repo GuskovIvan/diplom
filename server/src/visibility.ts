@@ -85,7 +85,7 @@ function eventTaskSnapshots(event: VisibleEvent) {
 }
 
 function canViewFullBoard(viewer?: ViewerMembership | null) {
-  return !viewer || isProjectAdminRole(viewer.role);
+  return !viewer || isProjectAdminRole(viewer.role) || viewer.role === "MEMBER";
 }
 
 function canViewFullEventHistory(viewer?: ViewerMembership | null) {
@@ -110,6 +110,7 @@ export function filterBoardForViewer<
   TBoard extends {
     columns: Array<{
       tasks: VisibleTask[];
+      completedTasks?: VisibleTask[];
     }>;
   }
 >(board: TBoard, viewer?: ViewerMembership | null): TBoard {
@@ -121,7 +122,8 @@ export function filterBoardForViewer<
     ...board,
     columns: board.columns.map((column) => ({
       ...column,
-      tasks: column.tasks.filter((task) => taskIsVisibleToViewer(task, viewer))
+      tasks: column.tasks.filter((task) => taskIsVisibleToViewer(task, viewer)),
+      completedTasks: column.completedTasks?.filter((task) => taskIsVisibleToViewer(task, viewer))
     }))
   };
 }

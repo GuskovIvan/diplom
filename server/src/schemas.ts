@@ -18,10 +18,21 @@ export const projectSchema = z.object({
 
 export const manageableProjectRoleSchema = z.enum(["ADMIN", "MEMBER"]);
 
-export const memberCreateSchema = z.object({
+export const userCreateSchema = z.object({
   email: z.string().email(),
-  name: z.string().min(2).max(80).optional(),
-  password: z.string().min(8).max(120).optional(),
+  name: z.string().min(2).max(80),
+  password: z.string().min(8).max(120),
+  projectIds: z.array(z.string().uuid()).optional().default([]),
+  role: manageableProjectRoleSchema.optional().default("MEMBER")
+});
+
+export const userProjectsCreateSchema = z.object({
+  projectIds: z.array(z.string().uuid()).min(1),
+  role: manageableProjectRoleSchema.optional().default("MEMBER")
+});
+
+export const memberCreateSchema = z.object({
+  userId: z.string().uuid(),
   role: manageableProjectRoleSchema.optional().default("MEMBER")
 });
 
@@ -91,6 +102,14 @@ export const taskMoveSchema = z.object({
   beforeTaskId: z.string().uuid().nullable().optional(),
   afterTaskId: z.string().uuid().nullable().optional(),
   clientVersion: z.number().int().min(1).optional()
+}).refine((value) => !(value.beforeTaskId && value.afterTaskId), {
+  message: "Use either beforeTaskId or afterTaskId, not both",
+  path: ["afterTaskId"]
+});
+
+export const completedTaskMoveSchema = z.object({
+  beforeTaskId: z.string().uuid().nullable().optional(),
+  afterTaskId: z.string().uuid().nullable().optional()
 }).refine((value) => !(value.beforeTaskId && value.afterTaskId), {
   message: "Use either beforeTaskId or afterTaskId, not both",
   path: ["afterTaskId"]

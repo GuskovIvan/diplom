@@ -44,8 +44,14 @@ export type Task = {
   priority: TaskPriority;
   position: number;
   version: number;
+  isCompleted: boolean;
+  completedAt: string | null;
+  completedPosition: number | null;
+  completionRequestedAt: string | null;
   creator: User;
   assignee: User | null;
+  completedBy: User | null;
+  completionRequestedBy: User | null;
   assigneeGroup: TaskGroup | null;
   createdAt: string;
   updatedAt: string;
@@ -61,6 +67,7 @@ export type BoardColumn = {
   createdAt: string;
   updatedAt: string;
   tasks: Task[];
+  completedTasks: Task[];
 };
 
 export type Board = Project & {

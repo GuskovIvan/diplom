@@ -32,6 +32,9 @@ enum TaskEventType {
   TASK_CREATED
   TASK_UPDATED
   TASK_MOVED
+  TASK_COMPLETION_REQUESTED
+  TASK_COMPLETED
+  TASK_ROADMAP_MOVED
   TASK_DELETED
 }
 
@@ -52,6 +55,8 @@ model User {
   memberships    ProjectMember[]
   assignedTasks  Task[]          @relation("TaskAssignee")
   createdTasks   Task[]          @relation("TaskCreator")
+  completedTasks Task[]          @relation("TaskCompleter")
+  requestedTaskCompletions Task[] @relation("TaskCompletionRequester")
   authoredEvents TaskEvent[]     @relation("TaskEventActor")
   announcements  Announcement[]  @relation("AnnouncementAuthor")
 }
@@ -140,6 +145,12 @@ model Task {
   priority        TaskPriority @default(MEDIUM)
   position        Decimal      @db.Decimal(20, 8)
   version         Int          @default(1)
+  isCompleted     Boolean      @default(false)
+  completedAt     DateTime?
+  completedPosition Int?
+  completedById   String?
+  completionRequestedAt DateTime?
+  completionRequestedById String?
   creatorId       String
   assigneeId      String?
   assigneeGroupId String?
@@ -149,12 +160,17 @@ model Task {
   column          BoardColumn  @relation(fields: [columnId], references: [id], onDelete: Cascade)
   creator         User         @relation("TaskCreator", fields: [creatorId], references: [id])
   assignee        User?        @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  completedBy     User?        @relation("TaskCompleter", fields: [completedById], references: [id], onDelete: SetNull)
+  completionRequestedBy User?  @relation("TaskCompletionRequester", fields: [completionRequestedById], references: [id], onDelete: SetNull)
   assigneeGroup   TaskGroup?   @relation("TaskGroupAssignee", fields: [assigneeGroupId], references: [id], onDelete: SetNull)
   events          TaskEvent[]
 
   @@index([projectId])
   @@index([columnId, position])
+  @@index([columnId, isCompleted, completedPosition])
   @@index([creatorId])
+  @@index([completedById])
+  @@index([completionRequestedById])
   @@index([assigneeGroupId])
 }
 

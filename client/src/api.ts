@@ -54,7 +54,7 @@ async function request<T>(path: string, options: RequestInit & { token?: string 
 
 export const api = {
   async register(input: { email: string; name: string; password: string }) {
-    return request<{ token: string; user: User; project: Project }>("/api/auth/register", {
+    return request<{ token: string; user: User }>("/api/auth/register", {
       method: "POST",
       body: JSON.stringify(input)
     });
@@ -77,6 +77,44 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input)
     });
+  },
+
+  async users(token: string) {
+    return request<{ users: User[] }>("/api/users", { token });
+  },
+
+  async createUser(token: string, input: { email: string; name: string; password: string; projectIds: string[]; role?: ProjectRole }) {
+    return request<{ user: User; member: ProjectMember | null; members: ProjectMember[] }>("/api/users", {
+      token,
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  async deleteUser(token: string, userId: string) {
+    return request<void>(`/api/users/${userId}`, {
+      token,
+      method: "DELETE"
+    });
+  },
+
+  async addUserToProjects(token: string, userId: string, input: { projectIds: string[]; role: ProjectRole }) {
+    return request<{ members: ProjectMember[] }>(`/api/users/${userId}/projects`, {
+      token,
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
+  async deleteProject(token: string, projectId: string) {
+    return request<void>(`/api/projects/${projectId}`, {
+      token,
+      method: "DELETE"
+    });
+  },
+
+  async availableUsers(token: string, projectId: string) {
+    return request<{ users: User[] }>(`/api/projects/${projectId}/available-users`, { token });
   },
 
   async board(token: string, projectId: string) {
@@ -190,6 +228,32 @@ export const api = {
     });
   },
 
+  async completeTask(token: string, taskId: string) {
+    return request<{ task: Task }>(`/api/tasks/${taskId}/complete`, {
+      token,
+      method: "POST"
+    });
+  },
+
+  async requestTaskCompletion(token: string, taskId: string) {
+    return request<{ task: Task; announcement: Announcement | null }>(`/api/tasks/${taskId}/request-completion`, {
+      token,
+      method: "POST"
+    });
+  },
+
+  async moveCompletedTask(
+    token: string,
+    taskId: string,
+    input: { beforeTaskId?: string | null; afterTaskId?: string | null }
+  ) {
+    return request<{ task: Task }>(`/api/tasks/${taskId}/roadmap-move`, {
+      token,
+      method: "POST",
+      body: JSON.stringify(input)
+    });
+  },
+
   async deleteTask(token: string, taskId: string) {
     return request<void>(`/api/tasks/${taskId}`, {
       token,
@@ -200,9 +264,9 @@ export const api = {
   async addMember(
     token: string,
     projectId: string,
-    input: { email: string; name?: string; password?: string; role: ProjectRole }
+    input: { userId: string; role: ProjectRole }
   ) {
-    return request<{ member: ProjectMember; createdUser: boolean; temporaryPassword: string | null }>(`/api/projects/${projectId}/members`, {
+    return request<{ member: ProjectMember }>(`/api/projects/${projectId}/members`, {
       token,
       method: "POST",
       body: JSON.stringify(input)

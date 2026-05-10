@@ -4,20 +4,23 @@ import { afterAll, describe, expect, it } from "vitest";
 import { io as createSocketClient } from "socket.io-client";
 import {
   addProjectMember,
+  completeTask,
   createProject,
   createTask,
   createTaskGroup,
   deleteTaskGroup,
   getBoard,
+  listAnnouncements,
   listEvents,
+  moveCompletedTask,
   moveTask,
+  requestTaskCompletion,
   removeProjectMember,
   updateProjectMemberRole,
   updateTask,
   updateTaskGroup
 } from "./board.service.js";
 import { hashPassword, signToken } from "./auth.js";
-import { HttpError } from "./errors.js";
 import { prisma } from "./prisma.js";
 import { createRealtimeServer, publishProjectEvent } from "./realtime.js";
 
@@ -36,6 +39,21 @@ async function createTestUser(label: string) {
   });
   createdUserIds.push(user.id);
   return user;
+}
+
+async function addRegisteredMember(input: {
+  projectId: string;
+  actorId: string;
+  label: string;
+  role: "ADMIN" | "MEMBER";
+}) {
+  const user = await createTestUser(input.label);
+  return addProjectMember({
+    projectId: input.projectId,
+    actorId: input.actorId,
+    userId: user.id,
+    role: input.role
+  });
 }
 
 async function createProjectFixture() {
@@ -149,17 +167,14 @@ describe.sequential("board collaboration integration", () => {
   it("records project events for members and task groups", async () => {
     const { owner, project } = await createProjectFixture();
 
-    const added = await addProjectMember({
+    const added = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `worker-${testRunId}@example.com`,
-      name: "Worker",
-      password: "worker-password-123",
+      label: "worker",
       role: "MEMBER"
     });
     expect(added.event.type).toBe("MEMBER_ADDED");
     expect(added.member.role).toBe("MEMBER");
-    createdUserIds.push(added.member.user.id);
 
     const updatedMember = await updateProjectMemberRole({
       projectId: project.id,
@@ -313,28 +328,128 @@ describe.sequential("board collaboration integration", () => {
     expect(moved.task.version).toBe(third.task.version + 1);
   });
 
-  it("shows members only their tasks on the board but full history for projects where they participate", async () => {
+  it("moves completed tasks from the board into ordered roadmap items", async () => {
+    const { owner, project } = await createProjectFixture();
+    const board = await getBoard(project.id);
+    const column = board.columns[0];
+    const worker = await addRegisteredMember({
+      projectId: project.id,
+      actorId: owner.id,
+      label: "completion-requester",
+      role: "MEMBER"
+    });
+
+    const first = await createTask({
+      projectId: project.id,
+      actorId: owner.id,
+      columnId: column.id,
+      title: "First completed task",
+      priority: "MEDIUM",
+      assigneeId: worker.member.user.id
+    });
+    const second = await createTask({
+      projectId: project.id,
+      actorId: owner.id,
+      columnId: column.id,
+      title: "Second completed task",
+      priority: "HIGH",
+      assigneeId: worker.member.user.id
+    });
+
+    await expect(
+      completeTask({
+        taskId: first.task.id,
+        actorId: owner.id
+      })
+    ).rejects.toMatchObject({
+      status: 409,
+      message: "Task has not been submitted for completion yet"
+    });
+
+    const request = await requestTaskCompletion({
+      taskId: first.task.id,
+      actorId: worker.member.user.id
+    });
+    expect(request.event?.type).toBe("TASK_COMPLETION_REQUESTED");
+    expect(request.task.columnId).toBe(column.id);
+    expect(request.task.completionRequestedBy?.id).toBe(worker.member.user.id);
+    expect(request.announcement?.title).toContain(first.task.title);
+
+    await requestTaskCompletion({
+      taskId: second.task.id,
+      actorId: worker.member.user.id
+    });
+
+    const ownerMembership = await prisma.projectMember.findUniqueOrThrow({
+      where: {
+        userId_projectId: {
+          userId: owner.id,
+          projectId: project.id
+        }
+      }
+    });
+    const ownerAnnouncements = await listAnnouncements(project.id, ownerMembership, 10);
+    expect(ownerAnnouncements.announcements.some((announcement) => (
+      announcement.body.includes(worker.member.user.name) && announcement.body.includes(first.task.title)
+    ))).toBe(true);
+
+    const firstCompleted = await completeTask({
+      taskId: first.task.id,
+      actorId: owner.id
+    });
+    const secondCompleted = await completeTask({
+      taskId: second.task.id,
+      actorId: owner.id
+    });
+
+    expect(firstCompleted.event?.type).toBe("TASK_COMPLETED");
+    expect(firstCompleted.task.completedPosition).toBe(1);
+    expect(firstCompleted.task.completedBy?.id).toBe(owner.id);
+    expect(secondCompleted.task.completedPosition).toBe(2);
+
+    const completedBoard = await getBoard(project.id);
+    const completedColumn = completedBoard.columns.find((item) => item.id === column.id);
+    expect(completedColumn?.tasks.map((task) => task.title)).not.toEqual(
+      expect.arrayContaining([first.task.title, second.task.title])
+    );
+    expect(completedColumn?.completedTasks.map((task) => task.title)).toEqual([
+      first.task.title,
+      second.task.title
+    ]);
+    expect(completedColumn?.completedTasks[0]?.completedBy?.email).toBe(owner.email);
+
+    const moved = await moveCompletedTask({
+      taskId: second.task.id,
+      actorId: owner.id,
+      beforeTaskId: first.task.id
+    });
+    expect(moved.event?.type).toBe("TASK_ROADMAP_MOVED");
+
+    const reorderedBoard = await getBoard(project.id);
+    const reorderedColumn = reorderedBoard.columns.find((item) => item.id === column.id);
+    expect(reorderedColumn?.completedTasks.map((task) => [task.title, task.completedPosition])).toEqual([
+      [second.task.title, 1],
+      [first.task.title, 2]
+    ]);
+  });
+
+  it("shows members full board state and full history for projects where they participate", async () => {
     const { owner, project } = await createProjectFixture();
     const board = await getBoard(project.id);
     const column = board.columns[0];
 
-    const workerOne = await addProjectMember({
+    const workerOne = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `member-one-${testRunId}@example.com`,
-      name: "Member One",
-      password: "member-one-password",
+      label: "member-one",
       role: "MEMBER"
     });
-    const workerTwo = await addProjectMember({
+    const workerTwo = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `member-two-${testRunId}@example.com`,
-      name: "Member Two",
-      password: "member-two-password",
+      label: "member-two",
       role: "MEMBER"
     });
-    createdUserIds.push(workerOne.member.user.id, workerTwo.member.user.id);
 
     const group = await createTaskGroup({
       projectId: project.id,
@@ -359,7 +474,7 @@ describe.sequential("board collaboration integration", () => {
       priority: "MEDIUM",
       assigneeGroupId: group.group.id
     });
-    await createTask({
+    const otherTask = await createTask({
       projectId: project.id,
       actorId: owner.id,
       columnId: column.id,
@@ -376,10 +491,11 @@ describe.sequential("board collaboration integration", () => {
     const visibleTasks = memberBoard.columns.flatMap((boardColumn) => boardColumn.tasks);
     const visibleTitles = visibleTasks.map((task) => task.title);
 
-    expect(visibleTitles).toEqual(expect.arrayContaining([directTask.task.title, groupTask.task.title]));
-    expect(visibleTitles).not.toContain("Hidden other task");
-    expect(visibleTasks).toHaveLength(2);
-    expect(visibleTasks.map((task) => task.creator.email)).toEqual([owner.email, owner.email]);
+    expect(visibleTitles).toEqual(
+      expect.arrayContaining([directTask.task.title, groupTask.task.title, otherTask.task.title])
+    );
+    expect(visibleTasks).toHaveLength(3);
+    expect(visibleTasks.map((task) => task.creator.email)).toEqual([owner.email, owner.email, owner.email]);
 
     const memberEvents = await listEvents(project.id, 50, workerMembership);
     const memberEventTitles = memberEvents.map((event) => taskTitleFromEventPayload(event.payload)).filter(Boolean);
@@ -400,23 +516,18 @@ describe.sequential("board collaboration integration", () => {
     const sourceColumn = board.columns[0];
     const targetColumn = board.columns[1];
 
-    const admin = await addProjectMember({
+    const admin = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `admin-${testRunId}@example.com`,
-      name: "Project Admin",
-      password: "project-admin-password",
+      label: "admin",
       role: "ADMIN"
     });
-    const member = await addProjectMember({
+    const member = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `member-${testRunId}@example.com`,
-      name: "Project Member",
-      password: "project-member-password",
+      label: "member",
       role: "MEMBER"
     });
-    createdUserIds.push(admin.member.user.id, member.member.user.id);
 
     const visibleTask = await createTask({
       projectId: project.id,
@@ -464,15 +575,12 @@ describe.sequential("board collaboration integration", () => {
   it("returns a conflict error when creating a duplicate group name", async () => {
     const { owner, project } = await createProjectFixture();
 
-    const worker = await addProjectMember({
+    const worker = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `duplicate-group-${testRunId}@example.com`,
-      name: "Duplicate Group Worker",
-      password: "duplicate-group-password",
+      label: "duplicate-group",
       role: "MEMBER"
     });
-    createdUserIds.push(worker.member.user.id);
 
     await createTaskGroup({
       projectId: project.id,
@@ -488,7 +596,7 @@ describe.sequential("board collaboration integration", () => {
         name: "Design team",
         memberIds: [worker.member.id]
       })
-    ).rejects.toMatchObject<HttpError>({
+    ).rejects.toMatchObject({
       status: 409,
       message: "A group with this name already exists in the project"
     });
@@ -499,23 +607,18 @@ describe.sequential("board collaboration integration", () => {
     const board = await getBoard(project.id);
     const column = board.columns[0];
 
-    const workerOne = await addProjectMember({
+    const workerOne = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `socket-one-${testRunId}@example.com`,
-      name: "Socket One",
-      password: "socket-one-password",
+      label: "socket-one",
       role: "MEMBER"
     });
-    const workerTwo = await addProjectMember({
+    const workerTwo = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `socket-two-${testRunId}@example.com`,
-      name: "Socket Two",
-      password: "socket-two-password",
+      label: "socket-two",
       role: "MEMBER"
     });
-    createdUserIds.push(workerOne.member.user.id, workerTwo.member.user.id);
 
     const httpServer = createServer();
     const ioServer = createRealtimeServer(httpServer);
@@ -603,23 +706,18 @@ describe.sequential("board collaboration integration", () => {
     const board = await getBoard(project.id);
     const column = board.columns[0];
 
-    const admin = await addProjectMember({
+    const admin = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `socket-admin-${testRunId}@example.com`,
-      name: "Socket Admin",
-      password: "socket-admin-password",
+      label: "socket-admin",
       role: "ADMIN"
     });
-    const member = await addProjectMember({
+    const member = await addRegisteredMember({
       projectId: project.id,
       actorId: owner.id,
-      email: `socket-member-${testRunId}@example.com`,
-      name: "Socket Member",
-      password: "socket-member-password",
+      label: "socket-member",
       role: "MEMBER"
     });
-    createdUserIds.push(admin.member.user.id, member.member.user.id);
 
     const httpServer = createServer();
     const ioServer = createRealtimeServer(httpServer);

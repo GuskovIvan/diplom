@@ -37,10 +37,17 @@ type WorkspaceView = "board" | "roadmap" | "announcements" | "audit";
 type RoadmapStatus = "upcoming" | "active" | "inactive" | "completed";
 
 type MemberCreateInput = {
-  email: string;
-  name?: string;
-  password?: string;
+  userId: string;
+  projectIds: string[];
   role: ProjectRole;
+};
+
+type UserCreateInput = {
+  email: string;
+  name: string;
+  password: string;
+  role: ProjectRole;
+  projectIds: string[];
 };
 
 type TaskCreateInput = {
@@ -52,6 +59,8 @@ type TaskCreateInput = {
 type DropData =
   | { type: "column"; columnId: string }
   | { type: "task"; columnId: string; taskId: string };
+
+const MEMBER_DONE_COLUMN_ID = "__member-done__";
 
 const priorityLabel: Record<TaskPriority, string> = {
   LOW: "низкий",
@@ -78,7 +87,7 @@ const roadmapStatusLabel: Record<RoadmapStatus, string> = {
   upcoming: "предстоящая",
   active: "активная",
   inactive: "неактивная",
-  completed: "завершена"
+  completed: "выполнено"
 };
 
 const eventLabel: Record<string, string> = {
@@ -95,6 +104,9 @@ const eventLabel: Record<string, string> = {
   TASK_CREATED: "задача создана",
   TASK_UPDATED: "задача изменена",
   TASK_MOVED: "задача перемещена",
+  TASK_COMPLETION_REQUESTED: "задача отправлена в готово",
+  TASK_COMPLETED: "задача выполнена",
+  TASK_ROADMAP_MOVED: "задача перемещена в roadmap",
   TASK_DELETED: "задача удалена"
 };
 
@@ -154,12 +166,63 @@ function assignmentLabel(task: Task) {
   return task.assignee?.name ?? "не назначен";
 }
 
-function taskIsAddressedToUser(task: Task, userId: string) {
-  return task.assignee?.id === userId || Boolean(task.assigneeGroup?.members.some((member) => member.user.id === userId));
-}
-
 function memberNames(members: ProjectMember[]) {
   return members.map((member) => member.user.name).join(", ");
+}
+
+function TrashIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="trash-icon">
+      <path d="M3 6h18" />
+      <path d="M8 6V4h8v2" />
+      <path d="M19 6l-1 14H6L5 6" />
+      <path d="M10 11v5" />
+      <path d="M14 11v5" />
+    </svg>
+  );
+}
+
+function selectedProjectSummary(projects: Project[], selectedIds: string[]) {
+  if (selectedIds.length === 0) {
+    return "проекты не выбраны";
+  }
+
+  if (selectedIds.length === 1) {
+    return projects.find((project) => project.id === selectedIds[0])?.name ?? "выбрано: 1";
+  }
+
+  return `выбрано: ${selectedIds.length}`;
+}
+
+type ProjectMultiSelectProps = {
+  projects: Project[];
+  selectedIds: string[];
+  open: boolean;
+  onToggleOpen: () => void;
+  onToggleProject: (projectId: string) => void;
+};
+
+function ProjectMultiSelect({ projects, selectedIds, open, onToggleOpen, onToggleProject }: ProjectMultiSelectProps) {
+  return (
+    <div className="dropdown-field">
+      <button type="button" className="dropdown-toggle" aria-expanded={open} onClick={onToggleOpen}>
+        <span>Выбрать проекты</span>
+        <small>{selectedProjectSummary(projects, selectedIds)}</small>
+      </button>
+
+      {open ? (
+        <div className="group-member-options dropdown-list">
+          {projects.length === 0 ? <p className="hint">Нет проектов, где вы администратор.</p> : null}
+          {projects.map((project) => (
+            <label className="checkbox-row" key={project.id}>
+              <input type="checkbox" checked={selectedIds.includes(project.id)} onChange={() => onToggleProject(project.id)} />
+              <span>{project.name}</span>
+            </label>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function getTaskTitleFromEvent(event: SyncEvent) {
@@ -274,6 +337,14 @@ function getInitials(name: string) {
     .join("");
 }
 
+function formatCompletedAt(value: string | null) {
+  return value ? new Date(value).toLocaleString("ru-RU") : "время не указано";
+}
+
+function taskHasCompletionRequest(task: Task) {
+  return !task.isCompleted && Boolean(task.completionRequestedAt);
+}
+
 function findTask(board: Board | null, taskId: string) {
   for (const column of board?.columns ?? []) {
     const task = column.tasks.find((item) => item.id === taskId);
@@ -326,16 +397,60 @@ function sortColumns(columns: BoardColumn[]) {
   return [...columns].sort((left, right) => left.position - right.position || left.title.localeCompare(right.title, "ru"));
 }
 
+function isSystemDoneColumn(column: BoardColumn) {
+  return column.title.trim().toLocaleLowerCase("ru-RU") === "готово";
+}
+
+function regularColumns(columns: BoardColumn[]) {
+  return sortColumns(columns).filter((column) => !isSystemDoneColumn(column));
+}
+
+function boardColumnsForRole(board: Board | null, role: ProjectRole | null) {
+  const columns = regularColumns(board?.columns ?? []);
+  if (role !== "MEMBER" || !board) {
+    return columns;
+  }
+
+  const submittedTasks = columns.flatMap((column) => column.tasks.filter(taskHasCompletionRequest));
+  const activeColumns = columns.map((column) => ({
+    ...column,
+    tasks: column.tasks.filter((task) => !taskHasCompletionRequest(task))
+  }));
+  const lastPosition = columns.reduce((max, column) => Math.max(max, column.position), -1);
+  const doneColumn: BoardColumn = {
+    id: MEMBER_DONE_COLUMN_ID,
+    projectId: board.id,
+    title: "Готово",
+    description: "Задачи, отправленные администратору на подтверждение.",
+    position: lastPosition + 1,
+    version: 1,
+    createdAt: board.createdAt,
+    updatedAt: board.updatedAt,
+    tasks: submittedTasks,
+    completedTasks: []
+  };
+
+  return [...activeColumns, doneColumn];
+}
+
+function completedTasksForColumn(column: BoardColumn) {
+  return [...(column.completedTasks ?? [])].sort((left, right) => (
+    (left.completedPosition ?? Number.MAX_SAFE_INTEGER) - (right.completedPosition ?? Number.MAX_SAFE_INTEGER) ||
+    new Date(left.completedAt ?? left.createdAt).getTime() - new Date(right.completedAt ?? right.createdAt).getTime() ||
+    left.title.localeCompare(right.title, "ru")
+  ));
+}
+
 function getRoadmapStatus(task: Task, columns: BoardColumn[]): RoadmapStatus {
+  if (task.isCompleted) {
+    return "completed";
+  }
+
   const orderedColumns = sortColumns(columns);
   const columnIndex = orderedColumns.findIndex((column) => column.id === task.columnId);
 
   if (columnIndex === -1) {
     return task.assignee || task.assigneeGroup ? "active" : "inactive";
-  }
-
-  if (columnIndex === orderedColumns.length - 1) {
-    return "completed";
   }
 
   if (columnIndex === 0) {
@@ -353,9 +468,9 @@ function getRoadmapStats(board: Board | null) {
     completed: 0
   };
 
-  const columns = board ? sortColumns(board.columns) : [];
+  const columns = board ? regularColumns(board.columns) : [];
   for (const column of columns) {
-    for (const task of column.tasks) {
+    for (const task of [...column.tasks, ...completedTasksForColumn(column)]) {
       stats[getRoadmapStatus(task, columns)] += 1;
     }
   }
@@ -480,40 +595,99 @@ function AppTopbar({ user, view, unreadAnnouncements, onViewChange, onLogout }: 
 
 type MembersPanelProps = {
   members: ProjectMember[];
+  availableUsers: User[];
+  projects: Project[];
+  activeProjectId: string | null;
   currentRole: ProjectRole | null;
   currentUserId: string;
   onAddMember: (input: MemberCreateInput) => Promise<void>;
+  onCreateUser: (input: UserCreateInput) => Promise<void>;
+  onDeleteUser: (user: User) => Promise<void>;
   onChangeRole: (member: ProjectMember, role: ProjectRole) => Promise<void>;
   onRemoveMember: (member: ProjectMember) => Promise<void>;
 };
 
-function MembersPanel({ members, currentRole, currentUserId, onAddMember, onChangeRole, onRemoveMember }: MembersPanelProps) {
-  const [email, setEmail] = React.useState("");
-  const [name, setName] = React.useState("");
-  const [password, setPassword] = React.useState("");
+type MemberPanelMode = "list" | "add" | "create";
+
+function MembersPanel({ members, availableUsers, projects, activeProjectId, currentRole, currentUserId, onAddMember, onCreateUser, onDeleteUser, onChangeRole, onRemoveMember }: MembersPanelProps) {
+  const [mode, setMode] = React.useState<MemberPanelMode>("list");
+  const [selectedUserId, setSelectedUserId] = React.useState("");
+  const [isUserListOpen, setIsUserListOpen] = React.useState(false);
+  const [isProjectListOpen, setIsProjectListOpen] = React.useState(false);
+  const [selectedProjectIds, setSelectedProjectIds] = React.useState<string[]>([]);
   const [role, setRole] = React.useState<ProjectRole>("MEMBER");
+  const [newUserName, setNewUserName] = React.useState("");
+  const [newUserEmail, setNewUserEmail] = React.useState("");
+  const [newUserPassword, setNewUserPassword] = React.useState("");
+  const [newUserRole, setNewUserRole] = React.useState<ProjectRole>("MEMBER");
+  const [isNewUserProjectListOpen, setIsNewUserProjectListOpen] = React.useState(false);
+  const [newUserProjectIds, setNewUserProjectIds] = React.useState<string[]>([]);
   const [submitting, setSubmitting] = React.useState(false);
+  const [creatingUser, setCreatingUser] = React.useState(false);
 
   const canManageMembers = isAdminRole(currentRole);
+  const selectedUser = availableUsers.find((user) => user.id === selectedUserId) ?? null;
+  const manageableProjects = React.useMemo(
+    () => projects.filter((project) => isAdminRole(project.role ?? "MEMBER")),
+    [projects]
+  );
+
+  React.useEffect(() => {
+    if (!canManageMembers) {
+      setMode("list");
+    }
+  }, [canManageMembers]);
+
+  React.useEffect(() => {
+    if (selectedUserId && !availableUsers.some((user) => user.id === selectedUserId)) {
+      setSelectedUserId("");
+    }
+  }, [availableUsers, selectedUserId]);
+
+  React.useEffect(() => {
+    const manageableIds = new Set(manageableProjects.map((project) => project.id));
+    const defaultProjectId = activeProjectId && manageableIds.has(activeProjectId)
+      ? activeProjectId
+      : manageableProjects[0]?.id ?? null;
+    const normalize = (current: string[]) => {
+      const next = current.filter((projectId) => manageableIds.has(projectId));
+      return next.length > 0 ? next : defaultProjectId ? [defaultProjectId] : [];
+    };
+
+    setSelectedProjectIds(normalize);
+    setNewUserProjectIds(normalize);
+  }, [activeProjectId, manageableProjects]);
+
+  const toggleSelectedProject = (projectId: string) => {
+    setSelectedProjectIds((current) => current.includes(projectId)
+      ? current.filter((id) => id !== projectId)
+      : [...current, projectId]);
+  };
+
+  const toggleNewUserProject = (projectId: string) => {
+    setNewUserProjectIds((current) => current.includes(projectId)
+      ? current.filter((id) => id !== projectId)
+      : [...current, projectId]);
+  };
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!email.trim() || !canManageMembers) {
+    if (!selectedUserId || selectedProjectIds.length === 0 || !canManageMembers) {
       return;
     }
 
     setSubmitting(true);
     try {
       await onAddMember({
-        email: email.trim(),
-        name: name.trim() || undefined,
-        password: password || undefined,
+        userId: selectedUserId,
+        projectIds: selectedProjectIds,
         role
       });
-      setEmail("");
-      setName("");
-      setPassword("");
+      setSelectedUserId("");
+      setIsUserListOpen(false);
+      setIsProjectListOpen(false);
       setRole("MEMBER");
+      setMode("list");
     } catch {
       // Ошибка показывается в общем notice.
     } finally {
@@ -521,17 +695,55 @@ function MembersPanel({ members, currentRole, currentUserId, onAddMember, onChan
     }
   };
 
+  const handleCreateUser = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!canManageMembers || !newUserName.trim() || !newUserEmail.trim() || !newUserPassword || newUserProjectIds.length === 0) {
+      return;
+    }
+
+    setCreatingUser(true);
+    try {
+      await onCreateUser({
+        name: newUserName.trim(),
+        email: newUserEmail.trim(),
+        password: newUserPassword,
+        role: newUserRole,
+        projectIds: newUserProjectIds
+      });
+      setNewUserName("");
+      setNewUserEmail("");
+      setNewUserPassword("");
+      setNewUserRole("MEMBER");
+      setIsNewUserProjectListOpen(false);
+      setMode("list");
+    } catch {
+      // Ошибка показывается в общем notice.
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
   return (
     <aside className="members-panel">
       <div className="panel-heading">
         <p className="eyebrow">Команда</p>
-        <h2>{canManageMembers ? "Добавить пользователя" : "Участники проекта"}</h2>
+        <h2>{canManageMembers ? "Участники и доступы" : "Участники проекта"}</h2>
       </div>
 
-      <div className="member-list">
+      {canManageMembers ? (
+        <div className="rail-tab-row">
+          <button type="button" className={mode === "list" ? "active" : ""} onClick={() => setMode("list")}>Список</button>
+          <button type="button" className={mode === "add" ? "active" : ""} onClick={() => setMode("add")}>Добавить</button>
+          <button type="button" className={mode === "create" ? "active" : ""} onClick={() => setMode("create")}>Создать</button>
+        </div>
+      ) : null}
+
+      {!canManageMembers || mode === "list" ? (
+        <div className="member-list">
         {members.map((member) => {
           const canChangeRole = currentRole === "ADMIN" && member.user.id !== currentUserId;
           const canRemove = currentRole === "ADMIN" && member.user.id !== currentUserId;
+          const canDeleteAccount = currentRole === "ADMIN" && member.user.id !== currentUserId;
 
           return (
             <article className="member-row" key={member.id}>
@@ -551,28 +763,106 @@ function MembersPanel({ members, currentRole, currentUserId, onAddMember, onChan
               )}
 
               {canRemove ? (
-                <button className="ghost-button" onClick={() => { void onRemoveMember(member); }}>Удалить</button>
+                <button className="ghost-button" onClick={() => { void onRemoveMember(member); }}>Убрать из проекта</button>
+              ) : null}
+
+              {canDeleteAccount ? (
+                <button
+                  type="button"
+                  className="icon-danger-button"
+                  aria-label={`Удалить аккаунт ${member.user.name}`}
+                  title="Удалить аккаунт"
+                  onClick={() => { void onDeleteUser(member.user); }}
+                >
+                  <TrashIcon />
+                </button>
               ) : null}
             </article>
           );
         })}
-      </div>
+        </div>
+      ) : null}
 
-      {canManageMembers ? (
-        <form className="member-form" onSubmit={handleSubmit}>
-          <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" placeholder="email пользователя" />
-          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="имя пользователя" />
-          <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={8} placeholder="пароль для нового аккаунта" />
-          <select value={role} onChange={(event) => setRole(event.target.value as ProjectRole)}>
-            <option value="MEMBER">участник</option>
-            <option value="ADMIN">администратор</option>
-          </select>
-          <button disabled={submitting}>{submitting ? "Добавляем..." : "Добавить"}</button>
-          <p className="hint">Если аккаунта нет, он будет создан с этим именем и паролем. Если пароль оставить пустым, сервер создаст уникальный временный пароль.</p>
-        </form>
-      ) : (
-        <p className="hint">Состав команды меняют администраторы.</p>
-      )}
+      {canManageMembers && mode === "add" ? (
+          <form className="member-form" onSubmit={handleSubmit}>
+            <div className="dropdown-field">
+              <button
+                type="button"
+                className="dropdown-toggle"
+                aria-expanded={isUserListOpen}
+                onClick={() => setIsUserListOpen((current) => !current)}
+              >
+                <span>{selectedUser ? selectedUser.name : "Выбрать пользователя"}</span>
+                <small>{selectedUser ? selectedUser.email : `${availableUsers.length} зарегистрировано`}</small>
+              </button>
+
+              {isUserListOpen ? (
+                <div className="dropdown-list">
+                  {availableUsers.length === 0 ? <p className="hint">Нет зарегистрированных пользователей для добавления.</p> : null}
+                  {availableUsers.map((user) => (
+                    <div className={`dropdown-user-row ${user.id === selectedUserId ? "selected" : ""}`} key={user.id}>
+                      <button
+                        type="button"
+                        className="dropdown-user-select"
+                        onClick={() => {
+                          setSelectedUserId(user.id);
+                          setIsUserListOpen(false);
+                        }}
+                      >
+                        <strong>{user.name}</strong>
+                        <span>{user.email}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-danger-button"
+                        aria-label={`Удалить аккаунт ${user.name}`}
+                        title="Удалить аккаунт"
+                        onClick={() => { void onDeleteUser(user); }}
+                      >
+                        <TrashIcon />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <ProjectMultiSelect
+              projects={manageableProjects}
+              selectedIds={selectedProjectIds}
+              open={isProjectListOpen}
+              onToggleOpen={() => setIsProjectListOpen((current) => !current)}
+              onToggleProject={toggleSelectedProject}
+            />
+            <select value={role} onChange={(event) => setRole(event.target.value as ProjectRole)}>
+              <option value="MEMBER">участник</option>
+              <option value="ADMIN">администратор</option>
+            </select>
+            <button disabled={submitting || !selectedUserId || selectedProjectIds.length === 0}>{submitting ? "Добавляем..." : "Добавить"}</button>
+            <p className="hint">Пользователь будет добавлен во все выбранные проекты.</p>
+          </form>
+      ) : null}
+
+      {canManageMembers && mode === "create" ? (
+          <form className="member-form user-create-form" onSubmit={handleCreateUser}>
+            <input value={newUserName} onChange={(event) => setNewUserName(event.target.value)} minLength={2} maxLength={80} placeholder="Имя нового пользователя" />
+            <input value={newUserEmail} onChange={(event) => setNewUserEmail(event.target.value)} type="email" placeholder="Email нового пользователя" />
+            <input value={newUserPassword} onChange={(event) => setNewUserPassword(event.target.value)} type="password" minLength={8} maxLength={120} placeholder="Пароль" />
+            <ProjectMultiSelect
+              projects={manageableProjects}
+              selectedIds={newUserProjectIds}
+              open={isNewUserProjectListOpen}
+              onToggleOpen={() => setIsNewUserProjectListOpen((current) => !current)}
+              onToggleProject={toggleNewUserProject}
+            />
+            <select value={newUserRole} onChange={(event) => setNewUserRole(event.target.value as ProjectRole)}>
+              <option value="MEMBER">участник</option>
+              <option value="ADMIN">администратор</option>
+            </select>
+            <button disabled={creatingUser || !newUserName.trim() || !newUserEmail.trim() || newUserPassword.length < 8 || newUserProjectIds.length === 0}>
+              {creatingUser ? "Создаем..." : "Создать пользователя"}
+            </button>
+          </form>
+      ) : null}
     </aside>
   );
 }
@@ -586,9 +876,13 @@ type GroupsPanelProps = {
   onDeleteGroup: (group: TaskGroup) => Promise<void>;
 };
 
+type GroupPanelMode = "list" | "form";
+
 function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGroup, onDeleteGroup }: GroupsPanelProps) {
+  const [mode, setMode] = React.useState<GroupPanelMode>("list");
   const [name, setName] = React.useState("");
   const [selectedIds, setSelectedIds] = React.useState<string[]>([]);
+  const [isMemberListOpen, setIsMemberListOpen] = React.useState(false);
   const [editingGroupId, setEditingGroupId] = React.useState<string | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
 
@@ -598,7 +892,17 @@ function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGrou
   const resetForm = () => {
     setName("");
     setSelectedIds([]);
+    setIsMemberListOpen(false);
     setEditingGroupId(null);
+    setMode("list");
+  };
+
+  const startCreating = () => {
+    setName("");
+    setSelectedIds([]);
+    setIsMemberListOpen(false);
+    setEditingGroupId(null);
+    setMode("form");
   };
 
   const toggleMember = (memberId: string) => {
@@ -612,7 +916,9 @@ function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGrou
   const startEditing = (group: TaskGroup) => {
     setEditingGroupId(group.id);
     setName(group.name);
+    setIsMemberListOpen(true);
     setSelectedIds(group.members.map((member) => member.id).filter((memberId) => members.some((member) => member.id === memberId)));
+    setMode("form");
   };
 
   const handleSubmit = async (event: React.FormEvent) => {
@@ -643,7 +949,17 @@ function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGrou
         <h2>Группы участников</h2>
       </div>
 
-      <div className="member-list">
+      {canManageGroups ? (
+        <div className="rail-tab-row">
+          <button type="button" className={mode === "list" ? "active" : ""} onClick={() => setMode("list")}>Список</button>
+          <button type="button" className={mode === "form" ? "active" : ""} onClick={startCreating}>
+            {editingGroup ? "Новая" : "Создать"}
+          </button>
+        </div>
+      ) : null}
+
+      {!canManageGroups || mode === "list" ? (
+        <div className="member-list">
         {groups.length === 0 ? <p className="hint">Групп пока нет.</p> : null}
 
         {groups.map((group) => {
@@ -666,20 +982,35 @@ function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGrou
             </article>
           );
         })}
-      </div>
+        </div>
+      ) : null}
 
-      {canManageGroups ? (
+      {canManageGroups && mode === "form" ? (
         <form className="member-form" onSubmit={handleSubmit}>
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Название группы" />
 
-          <div className="group-member-options">
-            {members.length === 0 ? <p className="hint">Нет доступных участников для группы.</p> : null}
-            {members.map((member) => (
-              <label className="checkbox-row" key={member.id}>
-                <input type="checkbox" checked={selectedIds.includes(member.id)} onChange={() => toggleMember(member.id)} />
-                <span>{member.user.name}</span>
-              </label>
-            ))}
+          <div className="dropdown-field">
+            <button
+              type="button"
+              className="dropdown-toggle"
+              aria-expanded={isMemberListOpen}
+              onClick={() => setIsMemberListOpen((current) => !current)}
+            >
+              <span>Выбрать участников</span>
+              <small>{selectedIds.length > 0 ? `выбрано: ${selectedIds.length}` : "никто не выбран"}</small>
+            </button>
+
+            {isMemberListOpen ? (
+              <div className="group-member-options dropdown-list">
+                {members.length === 0 ? <p className="hint">Нет доступных участников для группы.</p> : null}
+                {members.map((member) => (
+                  <label className="checkbox-row" key={member.id}>
+                    <input type="checkbox" checked={selectedIds.includes(member.id)} onChange={() => toggleMember(member.id)} />
+                    <span>{member.user.name}</span>
+                  </label>
+                ))}
+              </div>
+            ) : null}
           </div>
 
           <button disabled={submitting || selectedIds.length === 0}>
@@ -692,9 +1023,11 @@ function GroupsPanel({ groups, members, currentRole, onCreateGroup, onUpdateGrou
 
           <p className="hint">Администраторы могут включать в группы администраторов и участников.</p>
         </form>
-      ) : (
+      ) : null}
+
+      {!canManageGroups ? (
         <p className="hint">Группы создают администраторы проекта.</p>
-      )}
+      ) : null}
     </aside>
   );
 }
@@ -705,12 +1038,15 @@ type ProjectRailProps = {
   onSelect: (projectId: string) => void;
   onCreate: (input: { name: string; description: string }) => Promise<void>;
   user: User;
-  onLogout: () => void;
   members: ProjectMember[];
+  availableUsers: User[];
   groups: TaskGroup[];
   currentRole: ProjectRole | null;
   canCreateProjects: boolean;
+  onDeleteProject: () => Promise<void>;
   onAddMember: (input: MemberCreateInput) => Promise<void>;
+  onCreateUser: (input: UserCreateInput) => Promise<void>;
+  onDeleteUser: (user: User) => Promise<void>;
   onChangeRole: (member: ProjectMember, role: ProjectRole) => Promise<void>;
   onRemoveMember: (member: ProjectMember) => Promise<void>;
   onCreateGroup: (input: { name: string; memberIds: string[] }) => Promise<void>;
@@ -718,18 +1054,23 @@ type ProjectRailProps = {
   onDeleteGroup: (group: TaskGroup) => Promise<void>;
 };
 
+type RailAdminTab = "members" | "groups";
+
 function ProjectRail({
   projects,
   activeProjectId,
   onSelect,
   onCreate,
   user,
-  onLogout,
   members,
+  availableUsers,
   groups,
   currentRole,
   canCreateProjects,
+  onDeleteProject,
   onAddMember,
+  onCreateUser,
+  onDeleteUser,
   onChangeRole,
   onRemoveMember,
   onCreateGroup,
@@ -737,6 +1078,7 @@ function ProjectRail({
   onDeleteGroup
 }: ProjectRailProps) {
   const [projectName, setProjectName] = React.useState("");
+  const [adminTab, setAdminTab] = React.useState<RailAdminTab>("members");
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -763,48 +1105,74 @@ function ProjectRail({
         </div>
       </div>
 
-      <MembersPanel
-        members={members}
-        currentRole={currentRole}
-        currentUserId={user.id}
-        onAddMember={onAddMember}
-        onChangeRole={onChangeRole}
-        onRemoveMember={onRemoveMember}
-      />
+      <section className="rail-section rail-projects-panel">
+        <div className="rail-title">
+          <span>Проекты</span>
+          <small>{projects.length}</small>
+        </div>
 
-      <GroupsPanel
-        groups={groups}
-        members={allowedMemberTargets(members, currentRole)}
-        currentRole={currentRole}
-        onCreateGroup={onCreateGroup}
-        onUpdateGroup={onUpdateGroup}
-        onDeleteGroup={onDeleteGroup}
-      />
+        <nav className="project-list" aria-label="Проекты">
+          {projects.map((project) => (
+            <button className={project.id === activeProjectId ? "selected" : ""} key={project.id} onClick={() => onSelect(project.id)}>
+              <span>{project.name}</span>
+              <small>{roleLabel[project.role ?? "MEMBER"]}</small>
+            </button>
+          ))}
+        </nav>
 
-      <div className="rail-title">
-        <span>Пространства</span>
-        <small>{projects.length}</small>
-      </div>
+        <div className="rail-project-actions">
+          {activeProjectId && isAdminRole(currentRole) ? (
+            <button type="button" className="danger-button rail-danger" onClick={() => { void onDeleteProject(); }}>
+              Удалить проект
+            </button>
+          ) : null}
 
-      <nav className="project-list" aria-label="Проекты">
-        {projects.map((project) => (
-          <button className={project.id === activeProjectId ? "selected" : ""} key={project.id} onClick={() => onSelect(project.id)}>
-            <span>{project.name}</span>
-            <small>{roleLabel[project.role ?? "MEMBER"]}</small>
-          </button>
-        ))}
-      </nav>
+          {canCreateProjects ? (
+            <form className="compact-form" onSubmit={handleSubmit}>
+              <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Новый проект" />
+              <button>Создать</button>
+            </form>
+          ) : null}
+        </div>
+      </section>
 
-      {canCreateProjects ? (
-        <form className="compact-form" onSubmit={handleSubmit}>
-          <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Новый проект" />
-          <button>Создать</button>
-        </form>
-      ) : (
-        <p className="hint">Пространства создают администраторы.</p>
-      )}
+      {activeProjectId ? (
+        <section className="rail-section rail-admin-panel">
+          {isAdminRole(currentRole) ? (
+            <div className="rail-tab-row">
+              <button type="button" className={adminTab === "members" ? "active" : ""} onClick={() => setAdminTab("members")}>Участники</button>
+              <button type="button" className={adminTab === "groups" ? "active" : ""} onClick={() => setAdminTab("groups")}>Группы</button>
+            </div>
+          ) : null}
 
-      <button className="ghost-button" onClick={onLogout}>Выйти</button>
+          {!isAdminRole(currentRole) || adminTab === "members" ? (
+            <MembersPanel
+              members={members}
+              availableUsers={availableUsers}
+              projects={projects}
+              activeProjectId={activeProjectId}
+              currentRole={currentRole}
+              currentUserId={user.id}
+              onAddMember={onAddMember}
+              onCreateUser={onCreateUser}
+              onDeleteUser={onDeleteUser}
+              onChangeRole={onChangeRole}
+              onRemoveMember={onRemoveMember}
+            />
+          ) : null}
+
+          {isAdminRole(currentRole) && adminTab === "groups" ? (
+            <GroupsPanel
+              groups={groups}
+              members={allowedMemberTargets(members, currentRole)}
+              currentRole={currentRole}
+              onCreateGroup={onCreateGroup}
+              onUpdateGroup={onUpdateGroup}
+              onDeleteGroup={onDeleteGroup}
+            />
+          ) : null}
+        </section>
+      ) : null}
     </aside>
   );
 }
@@ -822,19 +1190,23 @@ function ConnectionBar({ connection, latency, users }: { connection: ConnectionS
 
 type TaskCardProps = {
   task: Task;
+  dropColumnId: string;
   members: ProjectMember[];
   groups: TaskGroup[];
   canEdit: boolean;
   canDelete: boolean;
+  canShowComplete: boolean;
+  canComplete: boolean;
   canMove: boolean;
   canAssign: boolean;
   onDelete: (task: Task) => Promise<void>;
+  onComplete: (task: Task) => Promise<void>;
   onQuickEdit: (task: Task) => Promise<void>;
   onAssign: (task: Task, input: TaskAssignmentInput) => Promise<void>;
 };
 
-function TaskCard({ task, members, groups, canEdit, canDelete, canMove, canAssign, onDelete, onQuickEdit, onAssign }: TaskCardProps) {
-  const drop = useDroppable({ id: `task-drop:${task.id}`, data: { type: "task", columnId: task.columnId, taskId: task.id } });
+function TaskCard({ task, dropColumnId, members, groups, canEdit, canDelete, canShowComplete, canComplete, canMove, canAssign, onDelete, onComplete, onQuickEdit, onAssign }: TaskCardProps) {
+  const drop = useDroppable({ id: `task-drop:${task.id}`, data: { type: "task", columnId: dropColumnId, taskId: task.id } });
   const drag = useDraggable({ id: task.id, disabled: !canMove, data: { type: "task", task } });
 
   const setNodeRef = React.useCallback((node: HTMLElement | null) => {
@@ -889,13 +1261,24 @@ function TaskCard({ task, members, groups, canEdit, canDelete, canMove, canAssig
         </div>
       </div>
 
-      {canEdit || canDelete ? (
+      {canEdit || canShowComplete || canDelete ? (
         <div className="task-actions">
           {canEdit ? (
-            <button onPointerDown={(event) => event.stopPropagation()} onClick={() => { void onQuickEdit(task); }}>Изменить</button>
+            <button className="task-action-edit" onPointerDown={(event) => event.stopPropagation()} onClick={() => { void onQuickEdit(task); }}>Изменить</button>
+          ) : null}
+          {canShowComplete ? (
+            <button
+              className="task-action-complete"
+              disabled={!canComplete}
+              title={canComplete ? "Подтвердить выполнение" : "Участник еще не отправил задачу в «Готово»"}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={() => { void onComplete(task); }}
+            >
+              Выполнено
+            </button>
           ) : null}
           {canDelete ? (
-            <button onPointerDown={(event) => event.stopPropagation()} onClick={() => { void onDelete(task); }}>Удалить</button>
+            <button className="task-action-delete" onPointerDown={(event) => event.stopPropagation()} onClick={() => { void onDelete(task); }}>Удалить</button>
           ) : null}
         </div>
       ) : null}
@@ -932,6 +1315,7 @@ function TaskCreateForm({
   onCreate: (input: TaskCreateInput) => Promise<void>;
 }) {
   const [title, setTitle] = React.useState("");
+  const [description, setDescription] = React.useState("");
   const [priority, setPriority] = React.useState<TaskPriority>("MEDIUM");
   const [assignment, setAssignment] = React.useState("");
 
@@ -943,12 +1327,13 @@ function TaskCreateForm({
 
     await onCreate({
       title: title.trim(),
-      description: "",
+      description: description.trim(),
       priority,
       ...assignmentInputFromValue(assignment)
     });
 
     setTitle("");
+    setDescription("");
     setPriority("MEDIUM");
     setAssignment("");
   };
@@ -956,6 +1341,7 @@ function TaskCreateForm({
   return (
     <form className="task-create" onSubmit={handleSubmit}>
       <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={`Задача в "${column.title}"`} />
+      <textarea value={description} onChange={(event) => setDescription(event.target.value)} rows={3} maxLength={1500} placeholder="Описание задачи" />
       <select value={priority} onChange={(event) => setPriority(event.target.value as TaskPriority)}>
         <option value="LOW">низкий</option>
         <option value="MEDIUM">средний</option>
@@ -991,12 +1377,15 @@ type BoardColumnViewProps = {
   canCreateTask: boolean;
   canEditTask: (task: Task) => boolean;
   canDeleteTask: (task: Task) => boolean;
+  canShowCompleteTask: (task: Task) => boolean;
+  canCompleteTask: (task: Task) => boolean;
   canMoveTask: (task: Task) => boolean;
   canAssignTask: boolean;
   onRenameColumn: (column: BoardColumn) => Promise<void>;
   onDeleteColumn: (column: BoardColumn) => Promise<void>;
   onCreateTask: (column: BoardColumn, input: TaskCreateInput) => Promise<void>;
   onDeleteTask: (task: Task) => Promise<void>;
+  onCompleteTask: (task: Task) => Promise<void>;
   onQuickEdit: (task: Task) => Promise<void>;
   onAssignTask: (task: Task, input: TaskAssignmentInput) => Promise<void>;
 };
@@ -1009,12 +1398,15 @@ function BoardColumnView({
   canCreateTask,
   canEditTask,
   canDeleteTask,
+  canShowCompleteTask,
+  canCompleteTask,
   canMoveTask,
   canAssignTask,
   onRenameColumn,
   onDeleteColumn,
   onCreateTask,
   onDeleteTask,
+  onCompleteTask,
   onQuickEdit,
   onAssignTask
 }: BoardColumnViewProps) {
@@ -1041,13 +1433,17 @@ function BoardColumnView({
           <TaskCard
             key={task.id}
             task={task}
+            dropColumnId={column.id}
             members={members}
             groups={groups}
             canEdit={canEditTask(task)}
             canDelete={canDeleteTask(task)}
+            canShowComplete={canShowCompleteTask(task)}
+            canComplete={canCompleteTask(task)}
             canMove={canMoveTask(task)}
             canAssign={canAssignTask}
             onDelete={onDeleteTask}
+            onComplete={onCompleteTask}
             onQuickEdit={onQuickEdit}
             onAssign={onAssignTask}
           />
@@ -1056,9 +1452,9 @@ function BoardColumnView({
 
       {canCreateTask ? (
         <TaskCreateForm column={column} members={members} groups={groups} onCreate={(input) => onCreateTask(column, input)} />
-      ) : (
+      ) : column.id !== MEMBER_DONE_COLUMN_ID ? (
         <p className="hint column-hint">Новые задачи добавляют администраторы проекта.</p>
-      )}
+      ) : null}
     </section>
   );
 }
@@ -1294,7 +1690,7 @@ function AuditView({
   latency: number | null;
   onlineUsers: Array<{ id: string; name: string }>;
 }) {
-  const taskCount = board?.columns.reduce((sum, column) => sum + column.tasks.length, 0) ?? 0;
+  const taskCount = boardColumns.reduce((sum, column) => sum + column.tasks.length, 0);
   const conflictCount = events.filter((event) => getConflictLabel(event)).length;
 
   return (
@@ -1350,76 +1746,32 @@ function AuditView({
 
 function RoadmapGoalCard({
   task,
-  columns,
-  members,
-  groups,
+  orderNumber,
   canManage,
-  onEditGoal,
-  onDeleteGoal,
-  onAssignGoal
+  onDeleteGoal
 }: {
   task: Task;
-  columns: BoardColumn[];
-  members: ProjectMember[];
-  groups: TaskGroup[];
+  orderNumber: number;
   canManage: boolean;
-  onEditGoal: (task: Task) => Promise<void>;
   onDeleteGoal: (task: Task) => Promise<void>;
-  onAssignGoal: (task: Task, input: TaskAssignmentInput) => Promise<void>;
 }) {
-  const status = getRoadmapStatus(task, columns);
-
   return (
     <article className="roadmap-goal">
       <div className="roadmap-goal-head">
-        <div>
-          <span className={`roadmap-chip roadmap-chip-${status}`}>{roadmapStatusLabel[status]}</span>
-          <h3>{task.title}</h3>
-        </div>
-        <span className={`priority ${task.priority.toLowerCase()}`}>{priorityLabel[task.priority]}</span>
+        <span className="roadmap-goal-number">{orderNumber}</span>
+        <h3>{task.title}</h3>
       </div>
 
       {task.description ? <p>{task.description}</p> : <p className="hint">Описание пока не добавлено.</p>}
 
       <div className="roadmap-goal-meta">
-        <span>Исполнитель</span>
-        {canManage ? (
-          <select value={assignmentValue(task)} onChange={(event) => { void onAssignGoal(task, assignmentInputFromValue(event.target.value)); }}>
-            <option value="">Не назначен</option>
-            {members.length > 0 ? (
-              <optgroup label="Участники">
-                {members.map((member) => (
-                  <option value={`user:${member.user.id}`} key={member.user.id}>{member.user.name}</option>
-                ))}
-              </optgroup>
-            ) : null}
-            {groups.length > 0 ? (
-              <optgroup label="Группы">
-                {groups.map((group) => (
-                  <option value={`group:${group.id}`} key={group.id}>{group.name}</option>
-                ))}
-              </optgroup>
-            ) : null}
-          </select>
-        ) : (
-          <strong>{assignmentLabel(task)}</strong>
-        )}
-      </div>
-
-      <div className="roadmap-goal-meta">
-        <span>Этап</span>
-        <strong>{getColumnTitleById(columns, task.columnId) ?? "Без этапа"}</strong>
-      </div>
-
-      <div className="roadmap-goal-meta">
-        <span>Создал/а</span>
-        <strong>{task.creator.name}</strong>
+        <span>Выполнено</span>
+        <strong>{formatCompletedAt(task.completedAt)}</strong>
       </div>
 
       {canManage ? (
         <div className="roadmap-actions">
-          <button type="button" onClick={() => { void onEditGoal(task); }}>Изменить</button>
-          <button type="button" onClick={() => { void onDeleteGoal(task); }}>Удалить</button>
+          <button type="button" className="roadmap-delete-button" onClick={() => { void onDeleteGoal(task); }}>Удалить</button>
         </div>
       ) : null}
     </article>
@@ -1552,43 +1904,35 @@ function RoadmapComposer({
 function RoadmapView({
   board,
   currentRole,
-  members,
-  groups,
-  onCreateGoal,
-  onEditGoal,
-  onDeleteGoal,
-  onAssignGoal
+  onDeleteGoal
 }: {
   board: Board | null;
   currentRole: ProjectRole | null;
-  members: ProjectMember[];
-  groups: TaskGroup[];
-  onCreateGoal: (input: TaskCreateInput & { columnId: string }) => Promise<void>;
-  onEditGoal: (task: Task) => Promise<void>;
   onDeleteGoal: (task: Task) => Promise<void>;
-  onAssignGoal: (task: Task, input: TaskAssignmentInput) => Promise<void>;
 }) {
-  const columns = React.useMemo(() => sortColumns(board?.columns ?? []), [board?.columns]);
+  const columns = React.useMemo(() => regularColumns(board?.columns ?? []), [board?.columns]);
   const stats = React.useMemo(() => getRoadmapStats(board), [board]);
   const canManage = isAdminRole(currentRole);
+  const activeTaskCount = stats.upcoming + stats.active + stats.inactive;
+  const columnsWithCompleted = columns.filter((column) => completedTasksForColumn(column).length > 0).length;
 
   return (
     <div className="roadmap-shell">
       <section className="roadmap-stats" aria-label="Статусы roadmap">
         <article className="roadmap-stat-card">
-          <span>Предстоящие</span>
-          <strong>{stats.upcoming}</strong>
+          <span>На доске</span>
+          <strong>{activeTaskCount}</strong>
         </article>
         <article className="roadmap-stat-card">
-          <span>Активные</span>
-          <strong>{stats.active}</strong>
+          <span>Этапов</span>
+          <strong>{columns.length}</strong>
         </article>
         <article className="roadmap-stat-card">
-          <span>Неактивные</span>
-          <strong>{stats.inactive}</strong>
+          <span>С выполненными</span>
+          <strong>{columnsWithCompleted}</strong>
         </article>
         <article className="roadmap-stat-card">
-          <span>Завершенные</span>
+          <span>Выполнено</span>
           <strong>{stats.completed}</strong>
         </article>
       </section>
@@ -1596,15 +1940,15 @@ function RoadmapView({
       <section className="roadmap-board-panel">
         <div className="panel-heading roadmap-board-heading">
           <p className="eyebrow">Roadmap</p>
-          <h2>Связанный маршрут задач проекта</h2>
-          <p>Сначала видно весь путь: от старта через этапы и связанные цели до финальной точки.</p>
+          <h2>Выполненные задачи по этапам проекта</h2>
+          <p>Задачи попадают сюда после кнопки «Выполнено» и остаются в той колонке, где были завершены.</p>
         </div>
 
         <section className="roadmap-trackboard" aria-label="Roadmap проекта">
           <article className="roadmap-cap">
             <span className="roadmap-cap-dot" />
             <strong>Старт</strong>
-            <p>Точка входа в маршрут проекта.</p>
+            <p>Начало истории выполненных задач проекта.</p>
           </article>
 
           {columns.length === 0 ? (
@@ -1622,20 +1966,16 @@ function RoadmapView({
                 </div>
 
                 <div className="roadmap-stage-list">
-                  {column.tasks.length === 0 ? (
-                    <div className="roadmap-empty">В этом этапе пока нет целей.</div>
+                  {completedTasksForColumn(column).length === 0 ? (
+                    <div className="roadmap-empty">В этом этапе пока нет выполненных задач.</div>
                   ) : (
-                    column.tasks.map((task) => (
+                    completedTasksForColumn(column).map((task, taskIndex) => (
                       <RoadmapGoalCard
                         key={task.id}
                         task={task}
-                        columns={columns}
-                        members={members}
-                        groups={groups}
+                        orderNumber={taskIndex + 1}
                         canManage={canManage}
-                        onEditGoal={onEditGoal}
                         onDeleteGoal={onDeleteGoal}
-                        onAssignGoal={onAssignGoal}
                       />
                     ))
                   )}
@@ -1647,12 +1987,10 @@ function RoadmapView({
           <article className="roadmap-cap roadmap-cap-end">
             <span className="roadmap-cap-dot" />
             <strong>Финиш</strong>
-            <p>Финальная точка маршрута и выполненные цели.</p>
+            <p>Порядок можно менять, номера обновятся автоматически.</p>
           </article>
         </section>
       </section>
-
-      <RoadmapComposer columns={columns} members={members} groups={groups} canManage={canManage} onCreateGoal={onCreateGoal} />
     </div>
   );
 }
@@ -1924,6 +2262,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
   const [projects, setProjects] = React.useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = React.useState<string | null>(null);
   const [board, setBoard] = React.useState<Board | null>(null);
+  const [availableUsers, setAvailableUsers] = React.useState<User[]>([]);
   const [events, setEvents] = React.useState<SyncEvent[]>([]);
   const [metrics, setMetrics] = React.useState<ProjectMetrics | null>(null);
   const [announcements, setAnnouncements] = React.useState<Announcement[]>([]);
@@ -1950,10 +2289,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     ?? projects.find((project) => project.id === activeProjectId)?.role
     ?? null;
   const canManageBoard = isAdminRole(currentRole);
-  const canCreateProjects = React.useMemo(
-    () => projects.some((project) => isAdminRole(project.role ?? "MEMBER")),
-    [projects]
-  );
+  const canCreateProjects = isAdminRole(currentRole);
   const taskTargetMembers = React.useMemo(
     () => allowedMemberTargets(board?.members ?? [], currentRole),
     [board?.members, currentRole]
@@ -1963,9 +2299,12 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     [board?.groups, currentRole]
   );
 
+  const boardColumns = React.useMemo(() => boardColumnsForRole(board, currentRole), [board, currentRole]);
   const canEditTask = React.useCallback((task: Task) => canManageBoard, [canManageBoard]);
-  const canMoveTask = React.useCallback((task: Task) => canManageBoard || taskIsAddressedToUser(task, auth.user.id), [auth.user.id, canManageBoard]);
+  const canMoveTask = React.useCallback((task: Task) => Boolean(currentRole) && !task.isCompleted && !(currentRole === "MEMBER" && taskHasCompletionRequest(task)), [currentRole]);
   const canDeleteTask = React.useCallback((task: Task) => canManageBoard, [canManageBoard]);
+  const canShowCompleteTask = React.useCallback((task: Task) => canManageBoard && !task.isCompleted, [canManageBoard]);
+  const canCompleteTask = React.useCallback((task: Task) => canManageBoard && !task.isCompleted && taskHasCompletionRequest(task), [canManageBoard]);
 
   const loadProjects = React.useCallback(async () => {
     const response = await api.projects(auth.token);
@@ -1981,6 +2320,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
   const loadBoard = React.useCallback(async () => {
     if (!activeProjectId) {
       setBoard(null);
+      setAvailableUsers([]);
       setEvents([]);
       setMetrics(null);
       setAnnouncements([]);
@@ -1996,11 +2336,18 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     ]);
 
     setBoard(boardResponse.board);
+    const viewerRole = boardResponse.board.members.find((member) => member.user.id === auth.user.id)?.role ?? null;
+    if (isAdminRole(viewerRole)) {
+      const usersResponse = await api.users(auth.token);
+      setAvailableUsers(usersResponse.users);
+    } else {
+      setAvailableUsers([]);
+    }
     setEvents(eventsResponse.events);
     setMetrics(metricsResponse.metrics);
     setAnnouncements(announcementsResponse.announcements);
     setUnreadAnnouncements(announcementsResponse.unreadCount);
-  }, [activeProjectId, auth.token]);
+  }, [activeProjectId, auth.token, auth.user.id]);
 
   const loadAnnouncements = React.useCallback(async () => {
     if (!activeProjectId) {
@@ -2151,7 +2498,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
 
   const createProject = async (input: { name: string; description: string }) => {
     if (!canCreateProjects) {
-      setError("Пространства создают только администраторы.");
+      setError("Проекты создают только администраторы.");
       return;
     }
 
@@ -2161,9 +2508,39 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
       setActiveProjectId(response.project.id);
       setView("board");
     } catch (createError) {
-      setError(safeError(createError, "Не удалось создать пространство"));
+      setError(safeError(createError, "Не удалось создать проект"));
       throw createError;
     }
+  };
+
+  const deleteActiveProject = async () => {
+    if (!activeProjectId || !canManageBoard) {
+      return;
+    }
+
+    const project = projects.find((item) => item.id === activeProjectId);
+    setConfirmDialog({
+      title: "Удалить проект",
+      message: `Проект "${project?.name ?? "текущий проект"}" и все его задачи, группы, объявления и журнал событий будут удалены.`,
+      confirmLabel: "Удалить",
+      onConfirm: async () => {
+        try {
+          await api.deleteProject(auth.token, activeProjectId);
+          setBoard(null);
+          setAvailableUsers([]);
+          setEvents([]);
+          setMetrics(null);
+          setAnnouncements([]);
+          setUnreadAnnouncements(0);
+          setView("board");
+          setActiveProjectId(null);
+          await loadProjects();
+        } catch (deleteError) {
+          setError(safeError(deleteError, "Не удалось удалить проект"));
+          throw deleteError;
+        }
+      }
+    });
   };
 
   const createColumn = async () => {
@@ -2254,6 +2631,36 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     });
   };
 
+  const completeTask = async (task: Task) => {
+    if (!canManageBoard) {
+      setError("Выполнять задачи могут только администраторы проекта.");
+      return;
+    }
+
+    try {
+      await api.completeTask(auth.token, task.id);
+      await loadBoard();
+    } catch (completeError) {
+      setError(safeError(completeError, "Не удалось отметить задачу выполненной"));
+      throw completeError;
+    }
+  };
+
+  const requestTaskCompletion = async (task: Task) => {
+    if (currentRole !== "MEMBER") {
+      setError("Отправлять задачу в «Готово» могут участники проекта.");
+      return;
+    }
+
+    try {
+      await api.requestTaskCompletion(auth.token, task.id);
+      await Promise.all([loadBoard(), loadAnnouncements()]);
+    } catch (requestError) {
+      setError(safeError(requestError, "Не удалось отправить задачу на подтверждение"));
+      throw requestError;
+    }
+  };
+
   const quickEditTask = async (task: Task) => {
     if (!canEditTask(task)) {
       setError("Изменять задачи могут только администраторы.");
@@ -2313,21 +2720,77 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     await loadBoard();
   };
 
-  const addMember = async (input: MemberCreateInput) => {
-    if (!activeProjectId) {
+  const moveRoadmapGoal = async (task: Task, input: { beforeTaskId?: string | null; afterTaskId?: string | null }) => {
+    if (!canManageBoard) {
+      setError("Менять порядок выполненных задач могут только администраторы проекта.");
       return;
     }
 
     try {
-      const response = await api.addMember(auth.token, activeProjectId, input);
+      await api.moveCompletedTask(auth.token, task.id, input);
+      await loadBoard();
+    } catch (moveError) {
+      setError(safeError(moveError, "Не удалось изменить порядок выполненных задач"));
+      throw moveError;
+    }
+  };
+
+  const addMember = async (input: MemberCreateInput) => {
+    if (!activeProjectId || input.projectIds.length === 0) {
+      return;
+    }
+
+    try {
+      await api.addUserToProjects(auth.token, input.userId, {
+        projectIds: input.projectIds,
+        role: input.role
+      });
       await Promise.all([loadBoard(), loadProjects()]);
-      if (response.createdUser && response.temporaryPassword) {
-        setError(`Пользователь ${input.email} создан и добавлен. Пароль: ${response.temporaryPassword}`);
-      }
     } catch (memberError) {
       setError(safeError(memberError, "Не удалось добавить участника"));
       throw memberError;
     }
+  };
+
+  const createRegisteredUser = async (input: UserCreateInput) => {
+    try {
+      await api.createUser(auth.token, {
+        email: input.email,
+        name: input.name,
+        password: input.password,
+        role: input.role,
+        projectIds: input.projectIds
+      });
+      await Promise.all([loadBoard(), loadProjects()]);
+    } catch (createError) {
+      setError(safeError(createError, "Не удалось создать пользователя"));
+      throw createError;
+    }
+  };
+
+  const deleteRegisteredUser = async (user: User) => {
+    setConfirmDialog({
+      title: "Удалить пользователя",
+      message: `Аккаунт "${user.name}" будет удален из системы. Его членство в проектах также будет удалено.`,
+      confirmLabel: "Удалить",
+      onConfirm: async () => {
+        try {
+          await api.deleteUser(auth.token, user.id);
+          await loadProjects();
+          await loadBoard().catch(() => {
+            setBoard(null);
+            setAvailableUsers([]);
+            setEvents([]);
+            setMetrics(null);
+            setAnnouncements([]);
+            setUnreadAnnouncements(0);
+          });
+        } catch (deleteError) {
+          setError(safeError(deleteError, "Не удалось удалить пользователя"));
+          throw deleteError;
+        }
+      }
+    });
   };
 
   const changeMemberRole = async (member: ProjectMember, role: ProjectRole) => {
@@ -2456,6 +2919,14 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     const nextColumnId = dropData.columnId;
     const beforeTaskId = dropData.type === "task" && dropData.taskId !== task.id ? dropData.taskId : null;
 
+    if (nextColumnId === MEMBER_DONE_COLUMN_ID) {
+      if (taskHasCompletionRequest(task)) {
+        return;
+      }
+      await requestTaskCompletion(task);
+      return;
+    }
+
     if (nextColumnId === task.columnId && !beforeTaskId) {
       return;
     }
@@ -2473,28 +2944,29 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
     }
 
     await loadBoard();
-  }, [auth.token, board, canMoveTask, loadBoard]);
+  }, [auth.token, board, canMoveTask, loadBoard, requestTaskCompletion]);
 
-  const taskCount = board?.columns.reduce((sum, column) => sum + column.tasks.length, 0) ?? 0;
+  const taskCount = boardColumns.reduce((sum, column) => sum + column.tasks.length, 0);
+  const hasProjects = projects.length > 0;
 
   const workspaceMeta = view === "roadmap"
     ? {
         eyebrow: "Roadmap проекта",
-        description: board?.description || "Дополнительное представление тех же задач по этапам проекта без расширения основной Kanban-модели."
+        description: board?.description || (hasProjects ? "Здесь собираются выполненные задачи: они исчезают с доски и остаются в своей колонке roadmap." : "Администратор должен добавить вас в проект, после этого здесь появятся задачи.")
       }
     : view === "announcements"
       ? {
           eyebrow: "Коммуникации проекта",
-          description: "Адресные объявления доставляются участникам проекта и помогают показать realtime-уведомления за пределами карточек."
+          description: hasProjects ? "Адресные объявления доставляются участникам проекта и помогают показать realtime-уведомления за пределами карточек." : "Пока вы не добавлены ни в один проект."
         }
       : view === "audit"
         ? {
             eyebrow: "Аудит и синхронизация",
-            description: "Журнал серверных событий, метрики WebSocket и конфликты версий показывают надежность практической части."
+            description: hasProjects ? "Журнал серверных событий, метрики WebSocket и конфликты версий показывают надежность практической части." : "Журнал появится после добавления в проект."
         }
       : {
           eyebrow: "Доска задач",
-          description: board?.description || "Главный сценарий диплома: REST сохраняет изменения, WebSocket доставляет события участникам без перезагрузки."
+          description: board?.description || (hasProjects ? "Главный сценарий диплома: REST сохраняет изменения, WebSocket доставляет события участникам без перезагрузки." : "Аккаунт создан. Дождитесь, пока администратор добавит вас в проект и назначит роль.")
         };
 
   return (
@@ -2507,12 +2979,15 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
         onSelect={setActiveProjectId}
         onCreate={createProject}
         user={auth.user}
-        onLogout={onLogout}
         members={board?.members ?? []}
+        availableUsers={availableUsers}
         groups={board?.groups ?? []}
         currentRole={currentRole}
         canCreateProjects={canCreateProjects}
+        onDeleteProject={deleteActiveProject}
         onAddMember={addMember}
+        onCreateUser={createRegisteredUser}
+        onDeleteUser={deleteRegisteredUser}
         onChangeRole={changeMemberRole}
         onRemoveMember={removeMember}
         onCreateGroup={createGroup}
@@ -2524,7 +2999,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
         <header className="workspace-header">
           <div>
             <p className="eyebrow">{workspaceMeta.eyebrow}</p>
-            <h1>{board?.name ?? "Загрузка доски..."}</h1>
+            <h1>{board?.name ?? (hasProjects ? "Загрузка доски..." : "Нет проектов")}</h1>
             <p>{workspaceMeta.description}</p>
           </div>
 
@@ -2552,7 +3027,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
             <section className="board-summary" aria-label="Сводка доски">
               <div>
                 <span>Колонки</span>
-                <strong>{board?.columns.length ?? 0}</strong>
+                <strong>{boardColumns.length}</strong>
               </div>
               <div>
                 <span>Задачи</span>
@@ -2575,7 +3050,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
             <div className={`work-area ${showEventFeed ? "" : "feed-hidden"}`}>
               <DndContext sensors={sensors} onDragStart={handleDragStart} onDragCancel={() => setActiveDragTask(null)} onDragEnd={(event) => { void handleDragEnd(event); }}>
                 <div className="board-grid">
-                  {board?.columns.map((column) => (
+                  {boardColumns.map((column) => (
                     <BoardColumnView
                       key={column.id}
                       column={column}
@@ -2585,12 +3060,15 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
                       canCreateTask={canManageBoard}
                       canEditTask={canEditTask}
                       canDeleteTask={canDeleteTask}
+                      canShowCompleteTask={canShowCompleteTask}
+                      canCompleteTask={canCompleteTask}
                       canMoveTask={canMoveTask}
                       canAssignTask={canManageBoard}
                       onRenameColumn={renameColumn}
                       onDeleteColumn={deleteColumn}
                       onCreateTask={createTask}
                       onDeleteTask={deleteTask}
+                      onCompleteTask={completeTask}
                       onQuickEdit={quickEditTask}
                       onAssignTask={assignTask}
                     />
@@ -2602,7 +3080,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
                 </DragOverlay>
               </DndContext>
 
-              {showEventFeed ? <EventFeed events={events} columns={board?.columns ?? []} /> : null}
+              {showEventFeed ? <EventFeed events={events} columns={boardColumns} /> : null}
             </div>
           </>
         ) : null}
@@ -2611,12 +3089,7 @@ function BoardScreen({ auth, onLogout }: { auth: AuthState; onLogout: () => void
           <RoadmapView
             board={board}
             currentRole={currentRole}
-            members={taskTargetMembers}
-            groups={taskTargetGroups}
-            onCreateGoal={createRoadmapGoal}
-            onEditGoal={quickEditTask}
             onDeleteGoal={deleteTask}
-            onAssignGoal={assignTask}
           />
         ) : null}
 

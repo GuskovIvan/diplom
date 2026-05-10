@@ -174,7 +174,7 @@ textarea {
 .app-shell {
   min-height: 100vh;
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: 380px minmax(0, 1fr);
   grid-template-rows: 58px minmax(0, 1fr);
   background: #eef2ee;
 }
@@ -269,13 +269,14 @@ textarea {
 .project-rail {
   grid-row: 2;
   display: grid;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto auto;
-  gap: 12px;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  align-content: start;
+  gap: 10px;
   min-height: 0;
   border-right: 1px solid var(--line);
   background: #ffffff;
-  padding: 16px;
-  overflow: auto;
+  padding: 12px;
+  overflow: hidden;
 }
 
 .rail-profile {
@@ -287,7 +288,68 @@ textarea {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #fbfcfa;
+  padding: 9px;
+}
+
+.rail-section {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
   padding: 10px;
+}
+
+.rail-projects-panel {
+  grid-template-rows: auto auto auto;
+}
+
+.rail-admin-panel {
+  overflow: visible;
+}
+
+.rail-project-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 7px;
+}
+
+.rail-project-actions .compact-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.project-rail input,
+.project-rail select,
+.project-rail textarea {
+  min-height: 36px;
+  padding: 7px 9px;
+}
+
+.rail-tab-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.rail-tab-row button {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--muted);
+  font-weight: 800;
+  padding: 7px 8px;
+}
+
+.rail-tab-row button:hover,
+.rail-tab-row button.active {
+  border-color: #bfe6d0;
+  background: var(--green-soft);
+  color: var(--green);
 }
 
 .avatar {
@@ -333,10 +395,11 @@ textarea {
 
 .project-list {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-content: start;
   gap: 6px;
   min-height: 0;
-  overflow-y: auto;
+  overflow: visible;
 }
 
 .project-list button {
@@ -347,7 +410,8 @@ textarea {
   border-radius: 8px;
   background: #ffffff;
   color: var(--ink);
-  padding: 10px;
+  min-height: 52px;
+  padding: 8px;
   box-shadow: 0 3px 10px rgba(32, 33, 36, 0.03);
 }
 
@@ -890,43 +954,47 @@ textarea {
 
 .roadmap-goal {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  background: linear-gradient(180deg, #ffffff, #f8faf7);
-  padding: 14px;
-  box-shadow: 0 10px 24px rgba(32, 33, 36, 0.07);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+  box-shadow: 0 6px 14px rgba(32, 33, 36, 0.05);
   width: min(100%, 280px);
 }
 
 .roadmap-goal-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.roadmap-goal-head > div {
   display: grid;
-  gap: 6px;
-  min-width: 0;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
 }
 
 .roadmap-goal-head h3 {
   margin: 0;
-  font-size: 17px;
+  font-size: 15px;
   line-height: 1.3;
   overflow-wrap: anywhere;
 }
 
-.roadmap-goal-head .priority {
-  flex-shrink: 0;
+.roadmap-goal-number {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--green-soft);
+  color: var(--green);
+  font-weight: 900;
+  line-height: 1;
 }
 
 .roadmap-goal > p {
   margin: 0;
   color: var(--muted);
+  font-size: 13px;
   line-height: 1.55;
+  overflow-wrap: anywhere;
 }
 
 .roadmap-chip {
@@ -956,13 +1024,13 @@ textarea {
 }
 
 .roadmap-chip-completed {
-  background: #ffe5df;
-  color: #a22e1f;
+  background: #daf1e3;
+  color: #1f8a5b;
 }
 
 .roadmap-goal-meta {
   display: grid;
-  gap: 4px;
+  gap: 3px;
 }
 
 .roadmap-goal-meta span {
@@ -972,6 +1040,12 @@ textarea {
 
 .roadmap-goal-meta strong {
   font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.roadmap-goal-meta small {
+  color: var(--muted);
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
@@ -992,6 +1066,17 @@ textarea {
   background: #ffffff;
   color: var(--muted);
   padding: 8px 10px;
+}
+
+.roadmap-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.roadmap-actions .roadmap-delete-button {
+  border-color: #b83a2d;
+  background: #b83a2d;
+  color: #ffffff;
 }
 
 .roadmap-empty {
@@ -1183,12 +1268,41 @@ textarea {
 
 .task-actions {
   margin-top: 8px;
+  justify-content: stretch;
+  flex-wrap: wrap;
 }
 
 .task-actions button {
+  flex: 1 1 88px;
   min-height: 30px;
   padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
   color: var(--muted);
+}
+
+.task-actions .task-action-edit {
+  background: #ffffff;
+  color: #2f3437;
+}
+
+.task-actions .task-action-complete {
+  border-color: #1f8a5b;
+  background: #1f8a5b;
+  color: #ffffff;
+}
+
+.task-actions .task-action-complete:disabled {
+  border-color: #cfd8cd;
+  background: #f1f3ef;
+  color: #8a918d;
+  cursor: not-allowed;
+}
+
+.task-actions .task-action-delete {
+  border-color: #b83a2d;
+  background: #b83a2d;
+  color: #ffffff;
 }
 
 .task-assignee,
@@ -1252,26 +1366,31 @@ textarea {
   gap: 8px;
   min-width: 0;
   max-height: 100%;
-  overflow-y: auto;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #ffffff;
   padding: 12px;
 }
 
+.event-feed {
+  overflow-y: auto;
+}
+
 .project-rail .members-panel {
-  max-height: 360px;
-  padding: 10px;
+  max-height: none;
+  border: 0;
+  padding: 0;
 }
 
 .project-rail .groups-panel {
-  max-height: 320px;
+  max-height: none;
 }
 
 .project-rail .member-list {
-  max-height: 210px;
-  overflow-y: auto;
-  padding-right: 2px;
+  max-height: none;
+  overflow: visible;
+  padding-right: 0;
 }
 
 .project-rail .panel-heading h2 {
@@ -1282,7 +1401,7 @@ textarea {
   display: grid;
   gap: 4px;
   border-bottom: 1px solid var(--line);
-  padding-bottom: 10px;
+  padding-bottom: 8px;
 }
 
 .event-feed article {
@@ -1306,7 +1425,7 @@ textarea {
 
 .member-list {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .member-row {
@@ -1317,7 +1436,7 @@ textarea {
   border: 1px solid #edf0eb;
   background: #fbfcfa;
   border-radius: 8px;
-  padding: 10px;
+  padding: 8px;
 }
 
 .member-row strong,
@@ -1349,9 +1468,145 @@ textarea {
 
 .member-form {
   display: grid;
-  gap: 8px;
+  gap: 7px;
   border-top: 1px solid var(--line);
-  padding-top: 10px;
+  padding-top: 8px;
+}
+
+.dropdown-field {
+  position: relative;
+  display: grid;
+  gap: 6px;
+}
+
+.dropdown-toggle {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  min-height: 42px;
+  text-align: left;
+  border: 1px solid var(--line) !important;
+  border-radius: 8px;
+  background: #fff !important;
+  color: var(--ink) !important;
+  padding: 9px 12px;
+}
+
+.dropdown-toggle span {
+  color: var(--ink);
+  font-weight: 800;
+}
+
+.dropdown-toggle small {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.dropdown-list {
+  display: grid;
+  gap: 6px;
+  max-height: 190px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px;
+  box-shadow: 0 14px 28px rgba(32, 33, 36, 0.12);
+}
+
+.dropdown-list button {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent !important;
+  border-radius: 8px;
+  background: #fbfcfa !important;
+  color: var(--ink) !important;
+  padding: 8px 10px;
+}
+
+.dropdown-list button:hover,
+.dropdown-list button.selected {
+  border-color: #bfe6d0 !important;
+  background: var(--green-soft) !important;
+}
+
+.dropdown-user-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 2px;
+}
+
+.dropdown-user-row.selected {
+  border-color: #bfe6d0;
+  background: var(--green-soft);
+}
+
+.dropdown-list .dropdown-user-select {
+  min-width: 0;
+}
+
+.icon-danger-button {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
+  border: 1px solid #ffc4b8;
+  border-radius: 8px;
+  background: #fff5f3;
+  color: #b42318;
+  padding: 0;
+}
+
+.icon-danger-button:hover {
+  border-color: #f97066;
+  background: #ffe5df;
+  color: #7a1a12;
+}
+
+.trash-icon {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dropdown-list .icon-danger-button {
+  align-self: center;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  background: #fff5f3 !important;
+  color: #b42318 !important;
+  padding: 0;
+}
+
+.dropdown-list .icon-danger-button:hover {
+  background: #ffe5df !important;
+  color: #7a1a12 !important;
+}
+
+.dropdown-list span {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.project-rail .dropdown-list,
+.project-rail .group-member-options {
+  max-height: 120px;
 }
 
 .group-member-options {
@@ -1501,6 +1756,15 @@ textarea {
   cursor: wait;
 }
 
+.rail-danger {
+  width: 100%;
+  min-height: 38px;
+}
+
+.user-create-form {
+  border-top-style: dashed;
+}
+
 .audit-layout {
   align-content: start;
 }
@@ -1570,6 +1834,7 @@ textarea {
     min-height: auto;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+    overflow: visible;
   }
 
   .workspace {

@@ -4,7 +4,7 @@ import {
   assertProjectAdmin,
   comparePassword,
   hashPassword,
-  isProjectAdminRole,
+  requireAnyProjectAdmin,
   requireAuth,
   requireProjectCreationAccess,
   requireProjectAdmin,
@@ -16,6 +16,7 @@ import {
   announcementCreateSchema,
   columnCreateSchema,
   columnUpdateSchema,
+  completedTaskMoveSchema,
   loginSchema,
   memberCreateSchema,
   memberUpdateSchema,
@@ -25,7 +26,9 @@ import {
   taskGroupUpdateSchema,
   taskCreateSchema,
   taskMoveSchema,
-  taskUpdateSchema
+  taskUpdateSchema,
+  userCreateSchema,
+  userProjectsCreateSchema
 } from "./schemas.js";
 import { HttpError, asyncRoute } from "./errors.js";
 import { prisma } from "./prisma.js";
@@ -35,19 +38,28 @@ import {
   createTask,
   createTaskGroup,
   deleteColumn,
+  deleteProject,
   deleteTaskGroup,
   deleteTask,
   getBoard,
   getRealtimeMetrics,
   acknowledgeAnnouncement,
+  addRegisteredUserToProjects,
   archiveAnnouncement,
   addProjectMember,
+  completeTask,
   createAnnouncement,
+  createRegisteredUser,
+  deleteRegisteredUser,
   listEvents,
   listAnnouncements,
+  listAvailableProjectUsers,
+  listRegisteredUsers,
   listProjects,
   markAnnouncementsRead,
+  moveCompletedTask,
   moveTask,
+  requestTaskCompletion,
   removeProjectMember,
   updateTaskGroup,
   updateProjectMemberRole,
@@ -211,31 +223,6 @@ async function assertExistingTaskGroupAllowed(actor: ProjectMembership, projectI
   assertActorCanTargetRoles(actor, group.members.map((item) => item.member.role));
 }
 
-async function assertTaskMovableByMembership(
-  membership: ProjectMembership,
-  task: { assigneeId: string | null; assigneeGroupId: string | null }
-) {
-  if (isProjectAdminRole(membership.role) || task.assigneeId === membership.userId) {
-    return;
-  }
-
-  if (task.assigneeGroupId) {
-    const groupMember = await prisma.taskGroupMember.findUnique({
-      where: {
-        groupId_memberId: {
-          groupId: task.assigneeGroupId,
-          memberId: membership.id
-        }
-      }
-    });
-    if (groupMember) {
-      return;
-    }
-  }
-
-  throw new HttpError(403, "Members can move only tasks assigned to them or their group");
-}
-
 export function registerRoutes(app: Express) {
   const router = Router();
 
@@ -264,16 +251,9 @@ export function registerRoutes(app: Express) {
         }
       });
 
-      const { project } = await createProject({
-        ownerId: user.id,
-        name: "Дипломная доска задач",
-        description: "Демо-проект для проверки REST API, WebSocket и синхронизации задач."
-      });
-
       res.status(201).json({
         token: signToken(user),
-        user: userDto(user),
-        project
+        user: userDto(user)
       });
     })
   );
@@ -301,6 +281,75 @@ export function registerRoutes(app: Express) {
   });
 
   router.get(
+    "/users",
+    asyncRoute(async (req, res) => {
+      await requireAnyProjectAdmin(authReq(req).user.id);
+      res.json({ users: await listRegisteredUsers(authReq(req).user.id) });
+    })
+  );
+
+  router.post(
+    "/users",
+    asyncRoute(async (req, res) => {
+      const input = userCreateSchema.parse(req.body);
+      if (input.projectIds.length > 0) {
+        await Promise.all(input.projectIds.map((projectId) => requireProjectAdmin(projectId, authReq(req).user.id)));
+      } else {
+        await requireAnyProjectAdmin(authReq(req).user.id);
+      }
+
+      const result = await createRegisteredUser({
+        actorId: authReq(req).user.id,
+        email: input.email,
+        name: input.name,
+        password: input.password,
+        projectIds: input.projectIds,
+        role: input.role
+      });
+
+      result.events.forEach((event) => publish(req, event));
+      res.status(201).json({
+        user: result.user,
+        member: result.member,
+        members: result.members
+      });
+    })
+  );
+
+  router.post(
+    "/users/:userId/projects",
+    asyncRoute(async (req, res) => {
+      const userId = routeParam(req, "userId");
+      const input = userProjectsCreateSchema.parse(req.body);
+      await Promise.all(input.projectIds.map((projectId) => requireProjectAdmin(projectId, authReq(req).user.id)));
+
+      const result = await addRegisteredUserToProjects({
+        actorId: authReq(req).user.id,
+        userId,
+        projectIds: input.projectIds,
+        role: input.role
+      });
+      result.events.forEach((event) => publish(req, event));
+      res.status(201).json({
+        members: result.members
+      });
+    })
+  );
+
+  router.delete(
+    "/users/:userId",
+    asyncRoute(async (req, res) => {
+      const userId = routeParam(req, "userId");
+      await requireAnyProjectAdmin(authReq(req).user.id);
+      await deleteRegisteredUser({
+        actorId: authReq(req).user.id,
+        userId
+      });
+      res.status(204).send();
+    })
+  );
+
+  router.get(
     "/projects",
     asyncRoute(async (req, res) => {
       res.json({ projects: await listProjects(authReq(req).user.id) });
@@ -320,6 +369,25 @@ export function registerRoutes(app: Express) {
       });
       publish(req, result.event);
       res.status(201).json({ project: result.project });
+    })
+  );
+
+  router.delete(
+    "/projects/:projectId",
+    asyncRoute(async (req, res) => {
+      const projectId = routeParam(req, "projectId");
+      await requireProjectAdmin(projectId, authReq(req).user.id);
+      await deleteProject(projectId);
+      res.status(204).send();
+    })
+  );
+
+  router.get(
+    "/projects/:projectId/available-users",
+    asyncRoute(async (req, res) => {
+      const projectId = routeParam(req, "projectId");
+      await requireProjectAdmin(projectId, authReq(req).user.id);
+      res.json({ users: await listAvailableProjectUsers(projectId) });
     })
   );
 
@@ -492,16 +560,12 @@ export function registerRoutes(app: Express) {
       const result = await addProjectMember({
         projectId,
         actorId: authReq(req).user.id,
-        email: input.email,
-        name: input.name,
-        password: input.password,
+        userId: input.userId,
         role: input.role
       });
       publish(req, result.event);
       res.status(201).json({
-        member: result.member,
-        createdUser: result.createdUser,
-        temporaryPassword: result.temporaryPassword
+        member: result.member
       });
     })
   );
@@ -668,8 +732,7 @@ export function registerRoutes(app: Express) {
       if (!current) {
         throw new HttpError(404, "Task was not found");
       }
-      const membership = await requireProjectMember(current.projectId, authReq(req).user.id);
-      await assertTaskMovableByMembership(membership, current);
+      await requireProjectMember(current.projectId, authReq(req).user.id);
 
       const input = taskMoveSchema.parse(req.body);
       const result = await moveTask({
@@ -682,6 +745,68 @@ export function registerRoutes(app: Express) {
         task: result.task,
         conflictResolved: result.conflictResolved
       });
+    })
+  );
+
+  router.post(
+    "/tasks/:taskId/request-completion",
+    asyncRoute(async (req, res) => {
+      const taskId = routeParam(req, "taskId");
+      const current = await prisma.task.findUnique({ where: { id: taskId } });
+      if (!current) {
+        throw new HttpError(404, "Task was not found");
+      }
+      await requireProjectMember(current.projectId, authReq(req).user.id);
+
+      const result = await requestTaskCompletion({
+        taskId,
+        actorId: authReq(req).user.id
+      });
+      publish(req, result.event);
+      if (result.announcement) {
+        publishAnnouncement(realtime(req), result.announcement);
+      }
+      res.json({ task: result.task, announcement: result.announcement });
+    })
+  );
+
+  router.post(
+    "/tasks/:taskId/complete",
+    asyncRoute(async (req, res) => {
+      const taskId = routeParam(req, "taskId");
+      const current = await prisma.task.findUnique({ where: { id: taskId } });
+      if (!current) {
+        throw new HttpError(404, "Task was not found");
+      }
+      await requireProjectAdmin(current.projectId, authReq(req).user.id);
+
+      const result = await completeTask({
+        taskId,
+        actorId: authReq(req).user.id
+      });
+      publish(req, result.event);
+      res.json({ task: result.task });
+    })
+  );
+
+  router.post(
+    "/tasks/:taskId/roadmap-move",
+    asyncRoute(async (req, res) => {
+      const taskId = routeParam(req, "taskId");
+      const current = await prisma.task.findUnique({ where: { id: taskId } });
+      if (!current) {
+        throw new HttpError(404, "Task was not found");
+      }
+      await requireProjectAdmin(current.projectId, authReq(req).user.id);
+
+      const input = completedTaskMoveSchema.parse(req.body);
+      const result = await moveCompletedTask({
+        taskId,
+        actorId: authReq(req).user.id,
+        ...input
+      });
+      publish(req, result.event);
+      res.json({ task: result.task });
     })
   );
 

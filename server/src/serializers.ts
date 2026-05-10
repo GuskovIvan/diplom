@@ -24,6 +24,8 @@ type ColumnWithTasks = BoardColumn & {
     Task & {
       creator: Pick<User, "id" | "name" | "email">;
       assignee: Pick<User, "id" | "name" | "email"> | null;
+      completedBy: Pick<User, "id" | "name" | "email"> | null;
+      completionRequestedBy: Pick<User, "id" | "name" | "email"> | null;
       assigneeGroup: TaskGroupWithMembers | null;
     }
   >;
@@ -74,6 +76,8 @@ export function taskDto(
   task: Task & {
     creator: Pick<User, "id" | "name" | "email">;
     assignee?: Pick<User, "id" | "name" | "email"> | null;
+    completedBy?: Pick<User, "id" | "name" | "email"> | null;
+    completionRequestedBy?: Pick<User, "id" | "name" | "email"> | null;
     assigneeGroup?: TaskGroupWithMembers | null;
   }
 ) {
@@ -86,8 +90,14 @@ export function taskDto(
     priority: task.priority,
     position: Number(task.position),
     version: task.version,
+    isCompleted: task.isCompleted,
+    completedAt: task.completedAt,
+    completedPosition: task.completedPosition,
+    completionRequestedAt: task.completionRequestedAt,
     creator: userDto(task.creator),
     assignee: task.assignee ? userDto(task.assignee) : null,
+    completedBy: task.completedBy ? userDto(task.completedBy) : null,
+    completionRequestedBy: task.completionRequestedBy ? userDto(task.completionRequestedBy) : null,
     assigneeGroup: task.assigneeGroup ? taskGroupDto(task.assigneeGroup) : null,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt
@@ -95,6 +105,17 @@ export function taskDto(
 }
 
 export function columnDto(column: ColumnWithTasks) {
+  const tasks = [...column.tasks]
+    .filter((task) => !task.isCompleted)
+    .sort((left, right) => Number(left.position) - Number(right.position));
+  const completedTasks = [...column.tasks]
+    .filter((task) => task.isCompleted)
+    .sort((left, right) => (
+      (left.completedPosition ?? Number.MAX_SAFE_INTEGER) - (right.completedPosition ?? Number.MAX_SAFE_INTEGER) ||
+      (left.completedAt?.getTime() ?? left.createdAt.getTime()) - (right.completedAt?.getTime() ?? right.createdAt.getTime()) ||
+      left.title.localeCompare(right.title, "ru")
+    ));
+
   return {
     id: column.id,
     projectId: column.projectId,
@@ -104,7 +125,8 @@ export function columnDto(column: ColumnWithTasks) {
     version: column.version,
     createdAt: column.createdAt,
     updatedAt: column.updatedAt,
-    tasks: column.tasks.map(taskDto)
+    tasks: tasks.map(taskDto),
+    completedTasks: completedTasks.map(taskDto)
   };
 }
 

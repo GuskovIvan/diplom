@@ -76,8 +76,7 @@ async function ensureProject(owner: User) {
         create: [
           { title: "План", description: "Идеи и задачи, которые еще не взяли в работу.", position: 0 },
           { title: "В работе", description: "Задачи, которые сейчас выполняются.", position: 1 },
-          { title: "На проверке", description: "Готовые изменения, ожидающие проверки.", position: 2 },
-          { title: "Готово", description: "Завершенные задачи проекта.", position: 3 }
+          { title: "На проверке", description: "Готовые изменения, ожидающие проверки.", position: 2 }
         ]
       }
     },
